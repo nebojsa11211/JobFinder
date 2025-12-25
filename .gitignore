@@ -1,0 +1,32 @@
+# Build results
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+packages/
+*.nupkg
+
+# Playwright browsers
+.playwright/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# User-specific files
+*.rsuser
+*.userprefs
+
+# OS generated files
+.DS_Store
+Thumbs.db

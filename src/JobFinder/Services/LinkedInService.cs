@@ -1,0 +1,615 @@
+using System.IO;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Microsoft.Playwright;
+using JobFinder.Models;
+
+namespace JobFinder.Services;
+
+public partial class LinkedInService : ILinkedInService, IAsyncDisposable
+{
+    private IPlaywright? _playwright;
+    private IBrowser? _browser;
+    private IBrowserContext? _context;
+    private IPage? _page;
+    private bool _isLoggedIn;
+    private readonly string _userDataDir;
+
+    public bool IsLoggedIn => _isLoggedIn;
+    public bool IsBrowserOpen => _browser != null;
+
+    public LinkedInService()
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        _userDataDir = Path.Combine(appData, "JobFinder", "browser-data");
+        Directory.CreateDirectory(_userDataDir);
+    }
+
+    public async Task InitializeAsync()
+    {
+        _playwright = await Playwright.CreateAsync();
+    }
+
+    public async Task OpenLoginWindowAsync()
+    {
+        if (_playwright == null)
+            await InitializeAsync();
+
+        // Launch browser in headed mode for manual login
+        _browser = await _playwright!.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = false,
+            Args = ["--start-maximized"]
+        });
+
+        // Only load storage state if file exists (for returning users)
+        var storageStatePath = GetStorageStatePath();
+        var contextOptions = new BrowserNewContextOptions
+        {
+            ViewportSize = ViewportSize.NoViewport
+        };
+
+        if (File.Exists(storageStatePath))
+        {
+            contextOptions.StorageStatePath = storageStatePath;
+        }
+
+        _context = await _browser.NewContextAsync(contextOptions);
+        _page = await _context.NewPageAsync();
+
+        // Navigate to feed if we have stored credentials, otherwise to login
+        await _page.GotoAsync("https://www.linkedin.com/feed");
+    }
+
+    public async Task<bool> CheckLoginStatusAsync()
+    {
+        if (_page == null) return false;
+
+        try
+        {
+            // Check if we're on the feed page or have the nav bar
+            var currentUrl = _page.Url;
+            _isLoggedIn = currentUrl.Contains("/feed") ||
+                          currentUrl.Contains("/jobs") ||
+                          await _page.Locator("nav.global-nav").CountAsync() > 0;
+
+            if (_isLoggedIn && _context != null)
+            {
+                // Save storage state for future sessions
+                await _context.StorageStateAsync(new BrowserContextStorageStateOptions
+                {
+                    Path = GetStorageStatePath()
+                });
+            }
+
+            return _isLoggedIn;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<List<Job>> SearchJobsAsync(SearchFilter filter, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    {
+        var jobs = new List<Job>();
+
+        if (_page == null || !_isLoggedIn)
+        {
+            progress?.Report("Not logged in. Please log in first.");
+            return jobs;
+        }
+
+        try
+        {
+            // Build search URL
+            var searchUrl = BuildSearchUrl(filter);
+            progress?.Report($"Navigating to LinkedIn Jobs...");
+
+            await _page.GotoAsync(searchUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            await Task.Delay(3000, cancellationToken);
+
+            int pageNum = 0;
+            int totalScraped = 0;
+            var processedJobIds = new HashSet<string>();
+
+            while (totalScraped < filter.MaxResults && !cancellationToken.IsCancellationRequested)
+            {
+                progress?.Report($"Scraping page {pageNum + 1}...");
+
+                // Scroll to load all jobs on the page
+                await ScrollJobListAsync();
+                await Task.Delay(2000, cancellationToken);
+
+                // Use Playwright Locator API to find all job links
+                var jobLinksLocator = _page.Locator("a[href*='/jobs/view/']");
+                var linkCount = await jobLinksLocator.CountAsync();
+                progress?.Report($"Found {linkCount} job links on page");
+
+                if (linkCount == 0)
+                {
+                    // Debug: check what's on the page
+                    var pageTitle = await _page.TitleAsync();
+                    var pageUrl = _page.Url;
+                    progress?.Report($"Page: {pageTitle}");
+                    progress?.Report($"URL: {pageUrl}");
+
+                    // Try to find any links at all
+                    var allLinksCount = await _page.Locator("a").CountAsync();
+                    progress?.Report($"Total links on page: {allLinksCount}");
+
+                    break;
+                }
+
+                // Process each job link using Locator API
+                for (int i = 0; i < linkCount && totalScraped < filter.MaxResults; i++)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                        break;
+
+                    try
+                    {
+                        var link = jobLinksLocator.Nth(i);
+                        var href = await link.GetAttributeAsync("href") ?? "";
+
+                        // Extract job ID from URL
+                        var jobIdMatch = JobIdRegex().Match(href);
+                        if (!jobIdMatch.Success)
+                            continue;
+
+                        var jobId = jobIdMatch.Groups[1].Value;
+
+                        // Skip if already processed
+                        if (processedJobIds.Contains(jobId))
+                            continue;
+                        processedJobIds.Add(jobId);
+
+                        // Get title from link text
+                        var title = await link.InnerTextAsync();
+                        title = title?.Trim() ?? "";
+
+                        if (string.IsNullOrWhiteSpace(title))
+                        {
+                            // Try aria-label
+                            title = await link.GetAttributeAsync("aria-label") ?? "Unknown";
+                        }
+
+                        // Find parent card to get company and location
+                        // Go up to the list item container
+                        var card = link.Locator("xpath=ancestor::li[1]");
+                        var cardExists = await card.CountAsync() > 0;
+
+                        string company = "Unknown";
+                        string location = "Unknown";
+                        bool hasEasyApply = false;
+                        string postedDate = "";
+
+                        if (cardExists)
+                        {
+                            // Get all text from the card and parse it
+                            var cardText = await card.InnerTextAsync();
+                            var lines = cardText.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                                               .Select(l => l.Trim())
+                                               .Where(l => !string.IsNullOrWhiteSpace(l))
+                                               .ToList();
+
+                            // Usually: Title, Company, Location, Time, [Viewed/Easy Apply]
+                            // Find company (usually after title, before location)
+                            for (int j = 0; j < lines.Count; j++)
+                            {
+                                var line = lines[j];
+
+                                // Skip the title line
+                                if (line.Contains(title.Split('–')[0].Trim().Substring(0, Math.Min(20, title.Split('–')[0].Trim().Length))))
+                                    continue;
+
+                                // Look for location patterns (contains "Remote" or location keywords)
+                                if (line.Contains("Remote") || line.Contains("(") ||
+                                    line.Contains("Europe") || line.Contains("Croatia") ||
+                                    line.Contains("EMEA") || line.Contains("Union"))
+                                {
+                                    if (location == "Unknown")
+                                        location = line;
+                                }
+                                // Time patterns
+                                else if (line.Contains("ago") || line.Contains("hour") ||
+                                         line.Contains("minute") || line.Contains("day") ||
+                                         line.Contains("week") || line.Contains("month"))
+                                {
+                                    postedDate = line;
+                                }
+                                // Easy Apply check
+                                else if (line.Equals("Easy Apply", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    hasEasyApply = true;
+                                }
+                                // Status indicators to skip
+                                else if (line == "Viewed" || line == "Applied" || line == "×")
+                                {
+                                    continue;
+                                }
+                                // Otherwise it might be company name
+                                else if (company == "Unknown" && line.Length > 2 && line.Length < 100)
+                                {
+                                    company = line;
+                                }
+                            }
+
+                            // Check for Easy Apply in full text
+                            if (!hasEasyApply && cardText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase))
+                            {
+                                hasEasyApply = true;
+                            }
+                        }
+
+                        var job = new Job
+                        {
+                            LinkedInJobId = jobId,
+                            Title = title,
+                            Company = company,
+                            Location = location,
+                            JobUrl = href.StartsWith("http") ? href : $"https://www.linkedin.com{href}",
+                            HasEasyApply = hasEasyApply,
+                            DatePosted = DateTime.Now, // We'll use scraped time since relative dates are hard to parse
+                            DateScraped = DateTime.Now,
+                            Status = ApplicationStatus.New
+                        };
+
+                        jobs.Add(job);
+                        totalScraped++;
+                        progress?.Report($"Found: {job.Title} at {job.Company}");
+                    }
+                    catch (Exception ex)
+                    {
+                        progress?.Report($"Error on job {i}: {ex.Message}");
+                    }
+                }
+
+                if (totalScraped >= filter.MaxResults)
+                    break;
+
+                // Try to go to next page
+                var nextButton = _page.Locator("button[aria-label='View next page'], button[aria-label='Page forward']").First;
+                var nextExists = await nextButton.CountAsync() > 0;
+
+                if (!nextExists)
+                {
+                    // Try numbered pagination
+                    var nextPageNum = pageNum + 2;
+                    nextButton = _page.Locator($"button[aria-label='Page {nextPageNum}']").First;
+                    nextExists = await nextButton.CountAsync() > 0;
+                }
+
+                if (!nextExists)
+                {
+                    progress?.Report("No more pages available.");
+                    break;
+                }
+
+                var isEnabled = await nextButton.IsEnabledAsync();
+                if (!isEnabled)
+                {
+                    progress?.Report("Next button disabled.");
+                    break;
+                }
+
+                await nextButton.ClickAsync();
+                await Task.Delay(3000, cancellationToken);
+                pageNum++;
+            }
+
+            progress?.Report($"Completed. Found {jobs.Count} jobs.");
+        }
+        catch (Exception ex)
+        {
+            progress?.Report($"Search error: {ex.Message}");
+        }
+
+        return jobs;
+    }
+
+    private async Task ScrollJobListAsync()
+    {
+        // Try multiple selectors for the job list container
+        var jobsList = await _page!.QuerySelectorAsync("ul.scaffold-layout__list-container, .jobs-search-results-list, .jobs-search__results-list");
+        if (jobsList != null)
+        {
+            // Scroll down the job list to load all items
+            for (int i = 0; i < 8; i++)
+            {
+                await jobsList.EvaluateAsync("el => el.scrollTop = el.scrollTop + 400");
+                await Task.Delay(400);
+            }
+            // Scroll back to top
+            await jobsList.EvaluateAsync("el => el.scrollTop = 0");
+            await Task.Delay(300);
+        }
+        else
+        {
+            // Fallback: scroll the whole page
+            for (int i = 0; i < 5; i++)
+            {
+                await _page.EvaluateAsync("window.scrollBy(0, 500)");
+                await Task.Delay(400);
+            }
+            await _page.EvaluateAsync("window.scrollTo(0, 0)");
+        }
+    }
+
+    private async Task<Job?> ExtractJobFromCardAsync(IElementHandle card)
+    {
+        // Try multiple selectors for job title - the title link is often the main link
+        var titleElement = await card.QuerySelectorAsync("a.job-card-list__title, a.job-card-container__link, .job-card-list__title, .artdeco-entity-lockup__title a, strong");
+
+        // Try multiple selectors for company name
+        var companyElement = await card.QuerySelectorAsync(".job-card-container__company-name, .job-card-container__primary-description, .artdeco-entity-lockup__subtitle span, .job-card-container__underline-wrapper span");
+
+        // Try multiple selectors for location
+        var locationElement = await card.QuerySelectorAsync(".job-card-container__metadata-item, .job-card-container__metadata-wrapper li, .artdeco-entity-lockup__caption span");
+
+        // The title element is often also the link
+        var linkElement = await card.QuerySelectorAsync("a.job-card-list__title, a.job-card-container__link, a[href*='/jobs/view/']");
+
+        var timeElement = await card.QuerySelectorAsync("time");
+
+        // If no link found, try to get it from the card's data attribute or any anchor
+        if (linkElement == null)
+        {
+            linkElement = await card.QuerySelectorAsync("a[href*='linkedin.com/jobs']");
+        }
+
+        if (titleElement == null && linkElement == null)
+            return null;
+
+        // Get title text - if titleElement is null, try to get it from link
+        string title = "Unknown";
+        if (titleElement != null)
+        {
+            title = await titleElement.InnerTextAsync();
+        }
+        else if (linkElement != null)
+        {
+            title = await linkElement.InnerTextAsync();
+        }
+
+        var company = companyElement != null ? await companyElement.InnerTextAsync() : "Unknown";
+        var location = locationElement != null ? await locationElement.InnerTextAsync() : "Unknown";
+
+        // Get href from link or from data attribute
+        var href = "";
+        if (linkElement != null)
+        {
+            href = await linkElement.GetAttributeAsync("href") ?? "";
+        }
+
+        // Also try to get job ID from data attribute on the card itself
+        var dataJobId = await card.GetAttributeAsync("data-occludable-job-id") ??
+                        await card.GetAttributeAsync("data-job-id");
+
+        var dateText = timeElement != null ? await timeElement.GetAttributeAsync("datetime") : null;
+
+        // Extract job ID from URL or use data attribute
+        string jobId;
+        if (!string.IsNullOrEmpty(dataJobId))
+        {
+            jobId = dataJobId;
+        }
+        else
+        {
+            var jobIdMatch = JobIdRegex().Match(href);
+            jobId = jobIdMatch.Success ? jobIdMatch.Groups[1].Value : Guid.NewGuid().ToString();
+        }
+
+        // Check for Easy Apply badge - multiple possible selectors
+        var easyApplyBadge = await card.QuerySelectorAsync(".job-card-container__apply-method, .job-card-container__footer-job-state, [class*='easy-apply']");
+        var hasEasyApply = false;
+        if (easyApplyBadge != null)
+        {
+            var badgeText = await easyApplyBadge.InnerTextAsync();
+            hasEasyApply = badgeText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Build job URL if we only have the ID
+        if (string.IsNullOrEmpty(href) && !string.IsNullOrEmpty(jobId) && jobId != Guid.Empty.ToString())
+        {
+            href = $"https://www.linkedin.com/jobs/view/{jobId}/";
+        }
+
+        return new Job
+        {
+            LinkedInJobId = jobId,
+            Title = title.Trim(),
+            Company = company.Trim(),
+            Location = location.Trim(),
+            JobUrl = href.StartsWith("http") ? href : $"https://www.linkedin.com{href}",
+            HasEasyApply = hasEasyApply,
+            DatePosted = DateTime.TryParse(dateText, out var date) ? date : DateTime.Now,
+            DateScraped = DateTime.Now,
+            Status = ApplicationStatus.New
+        };
+    }
+
+    public async Task<JobDetails?> GetJobDetailsAsync(string jobUrl)
+    {
+        if (_page == null || !_isLoggedIn)
+            return null;
+
+        try
+        {
+            await _page.GotoAsync(jobUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            await Task.Delay(2000);
+
+            var details = new JobDetails();
+
+            // Get description - try multiple selectors
+            var descriptionElement = await _page.QuerySelectorAsync(".jobs-description-content__text, .jobs-description__content, .jobs-box__html-content, article.jobs-description");
+            if (descriptionElement != null)
+            {
+                details.Description = await descriptionElement.InnerTextAsync();
+            }
+
+            // Check for Easy Apply button - try multiple selectors
+            var easyApplyButton = await _page.QuerySelectorAsync(".jobs-apply-button--top-card, .jobs-apply-button, button.jobs-apply-button, [data-job-apply-button]");
+            if (easyApplyButton != null)
+            {
+                var buttonText = await easyApplyButton.InnerTextAsync();
+                details.HasEasyApply = buttonText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
+            }
+
+            // Look for external apply link
+            if (easyApplyButton != null && !details.HasEasyApply)
+            {
+                var applyText = await easyApplyButton.InnerTextAsync();
+                if (applyText.Contains("Apply", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Click to potentially get external URL
+                    await easyApplyButton.ClickAsync();
+                    await Task.Delay(1500);
+
+                    // Check for external link modal
+                    var externalLink = await _page.QuerySelectorAsync(".jobs-apply-button__external-link, a[data-tracking-control-name*='external'], .artdeco-modal a[href*='http']");
+                    if (externalLink != null)
+                    {
+                        details.ExternalApplyUrl = await externalLink.GetAttributeAsync("href");
+                    }
+
+                    // Close any modal that opened
+                    var closeButton = await _page.QuerySelectorAsync(".artdeco-modal__dismiss, button[data-test-modal-close-btn]");
+                    if (closeButton != null)
+                    {
+                        await closeButton.ClickAsync();
+                    }
+                }
+            }
+
+            // Try to find recruiter email in description
+            if (details.Description != null)
+            {
+                var emailMatch = EmailRegex().Match(details.Description);
+                if (emailMatch.Success)
+                {
+                    details.RecruiterEmail = emailMatch.Value;
+                }
+            }
+
+            return details;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<bool> StartEasyApplyAsync(string jobUrl)
+    {
+        if (_page == null || !_isLoggedIn)
+            return false;
+
+        try
+        {
+            await _page.GotoAsync(jobUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            await Task.Delay(2000);
+
+            // Click Easy Apply button - try multiple selectors
+            var easyApplyButton = await _page.QuerySelectorAsync(".jobs-apply-button--top-card, .jobs-apply-button, button.jobs-apply-button, [data-job-apply-button]");
+            if (easyApplyButton == null)
+                return false;
+
+            var buttonText = await easyApplyButton.InnerTextAsync();
+            if (!buttonText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            await easyApplyButton.ClickAsync();
+            await Task.Delay(1500);
+
+            // The modal is now open - user can complete manually
+            // We could automate more steps here but it's safer to let user review
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string BuildSearchUrl(SearchFilter filter)
+    {
+        var baseUrl = "https://www.linkedin.com/jobs/search/?";
+        var parameters = new List<string>
+        {
+            $"keywords={Uri.EscapeDataString(filter.JobTitle)}"
+        };
+
+        // Remote filter (f_WT=2 means remote)
+        if (filter.RemoteOnly)
+        {
+            parameters.Add("f_WT=2");
+        }
+
+        // Experience level (f_E=3 is Associate, 4 is Mid-Senior, 5 is Director)
+        var expLevels = new List<string>();
+        foreach (var level in filter.ExperienceLevels)
+        {
+            if (level.Contains("Mid") || level.Contains("Senior"))
+                expLevels.Add("4");
+            if (level.Contains("Director"))
+                expLevels.Add("5");
+        }
+        if (expLevels.Count > 0)
+        {
+            parameters.Add($"f_E={string.Join(",", expLevels.Distinct())}");
+        }
+
+        // Location
+        if (filter.Locations.Count > 0)
+        {
+            parameters.Add($"location={Uri.EscapeDataString(filter.Locations[0])}");
+        }
+
+        // Sort by most recent
+        parameters.Add("sortBy=DD");
+
+        return baseUrl + string.Join("&", parameters);
+    }
+
+    private string GetStorageStatePath()
+    {
+        return Path.Combine(_userDataDir, "storage-state.json");
+    }
+
+    public async Task CloseAsync()
+    {
+        if (_context != null && _isLoggedIn)
+        {
+            try
+            {
+                await _context.StorageStateAsync(new BrowserContextStorageStateOptions
+                {
+                    Path = GetStorageStatePath()
+                });
+            }
+            catch { }
+        }
+
+        if (_browser != null)
+        {
+            await _browser.CloseAsync();
+            _browser = null;
+        }
+
+        _page = null;
+        _context = null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await CloseAsync();
+        _playwright?.Dispose();
+    }
+
+    [GeneratedRegex(@"/view/(\d+)")]
+    private static partial Regex JobIdRegex();
+
+    [GeneratedRegex(@"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")]
+    private static partial Regex EmailRegex();
+}
