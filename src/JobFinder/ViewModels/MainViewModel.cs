@@ -347,7 +347,51 @@ public partial class MainViewModel : ObservableObject
                     await _jobRepository.UpdateJobAsync(job);
                 }
 
-                StatusMessage = "Job details loaded.";
+                StatusMessage = "Job details loaded. Getting AI summary...";
+
+                // Now get AI summary if not already present
+                if (_kimiService.IsConfigured && string.IsNullOrEmpty(SelectedJob.SummaryCroatian) && !string.IsNullOrEmpty(details.Description))
+                {
+                    try
+                    {
+                        var summary = await _kimiService.GetSummaryAsync(details.Description);
+                        if (summary != null && !string.IsNullOrEmpty(summary.Summary))
+                        {
+                            SelectedJob.SummaryCroatian = summary.Summary;
+                            SelectedJob.ShortSummary = summary.ShortSummary;
+                            SelectedJob.Rating = summary.Rating;
+                            SelectedJob.DiscardReason = summary.DiscardReason;
+
+                            // Update in database
+                            if (job != null)
+                            {
+                                job.SummaryCroatian = summary.Summary;
+                                job.ShortSummary = summary.ShortSummary;
+                                job.Rating = summary.Rating;
+                                job.DiscardReason = summary.DiscardReason;
+                                await _jobRepository.UpdateJobAsync(job);
+                            }
+
+                            StatusMessage = "Job details and AI summary loaded.";
+                        }
+                        else
+                        {
+                            StatusMessage = "Job details loaded. AI summary failed.";
+                        }
+                    }
+                    catch
+                    {
+                        StatusMessage = "Job details loaded. AI summary failed.";
+                    }
+                }
+                else if (!_kimiService.IsConfigured)
+                {
+                    StatusMessage = "Job details loaded. Configure Kimi API for AI summaries.";
+                }
+                else
+                {
+                    StatusMessage = "Job details loaded.";
+                }
             }
             else
             {
@@ -447,11 +491,10 @@ public partial class MainViewModel : ObservableObject
                         job.Rating = result.Rating;
                         job.DiscardReason = result.DiscardReason;
 
-                        // Auto-discard disabled - just save the analysis results
-                        // User can manually discard later based on rating/recommendation
-                        // Store the AI's recommendation for reference
-                        if (result.ShouldDiscard && string.IsNullOrEmpty(job.DiscardReason))
+                        // Auto-discard enabled - discard jobs the AI recommends discarding
+                        if (result.ShouldDiscard)
                         {
+                            job.IsDiscarded = true;
                             job.DiscardReason = result.DiscardReason ?? "AI recommended discard";
                         }
 
@@ -587,10 +630,10 @@ public partial class MainViewModel : ObservableObject
                     job.Rating = result.Rating;
                     job.DiscardReason = result.DiscardReason;
 
-                    // Auto-discard disabled - just save the analysis results
-                    // Store the AI's recommendation for reference
-                    if (result.ShouldDiscard && string.IsNullOrEmpty(job.DiscardReason))
+                    // Auto-discard enabled - discard jobs the AI recommends discarding
+                    if (result.ShouldDiscard)
                     {
+                        job.IsDiscarded = true;
                         job.DiscardReason = result.DiscardReason ?? "AI recommended discard";
                     }
 
@@ -602,6 +645,7 @@ public partial class MainViewModel : ObservableObject
                         dbJob.ShortSummary = result.ShortSummary;
                         dbJob.Rating = result.Rating;
                         dbJob.DiscardReason = job.DiscardReason;
+                        dbJob.IsDiscarded = job.IsDiscarded;
                         await _jobRepository.UpdateJobAsync(dbJob);
                     }
 

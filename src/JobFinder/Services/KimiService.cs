@@ -104,6 +104,71 @@ public class KimiService : IKimiService
         }
     }
 
+    public async Task<(bool Success, string? ErrorMessage)> ValidateApiKeyAsync()
+    {
+        if (!IsConfigured)
+        {
+            return (false, "API key is not configured. Please add your Kimi API key in Settings.");
+        }
+
+        var settings = _settingsService.Settings;
+
+        try
+        {
+            // Make a minimal API call to test the key
+            var requestBody = new
+            {
+                model = settings.KimiModel,
+                messages = new object[]
+                {
+                    new { role = "user", content = "Hi" }
+                },
+                max_tokens = 5
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Clear();
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", settings.KimiApiKey);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var response = await _httpClient.PostAsync(
+                $"{settings.KimiApiBaseUrl.TrimEnd('/')}/chat/completions",
+                content,
+                cts.Token);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return (true, null);
+            }
+
+            var errorContent = await response.Content.ReadAsStringAsync();
+
+            return response.StatusCode switch
+            {
+                System.Net.HttpStatusCode.Unauthorized => (false, "Invalid API key. Please check your Kimi API key in Settings."),
+                System.Net.HttpStatusCode.Forbidden => (false, "API key does not have permission. Please check your Kimi API key."),
+                System.Net.HttpStatusCode.TooManyRequests => (false, "API rate limit exceeded. Please try again later."),
+                System.Net.HttpStatusCode.NotFound => (false, $"API endpoint not found. Please check the API base URL in Settings.\n\nURL: {settings.KimiApiBaseUrl}"),
+                System.Net.HttpStatusCode.BadRequest => (false, $"Invalid request to API. Model '{settings.KimiModel}' may not be available."),
+                _ => (false, $"API error ({response.StatusCode}): {errorContent}")
+            };
+        }
+        catch (TaskCanceledException)
+        {
+            return (false, "Connection timed out. Please check your internet connection and API base URL.");
+        }
+        catch (HttpRequestException ex)
+        {
+            return (false, $"Connection failed: {ex.Message}\n\nPlease check your internet connection and API base URL.");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Unexpected error: {ex.Message}");
+        }
+    }
+
     private async Task LogAiResponseAsync(string jobDescription, string response, JobSummaryResult? result)
     {
         try

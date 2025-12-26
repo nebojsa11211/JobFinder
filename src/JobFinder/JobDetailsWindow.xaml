@@ -126,7 +126,7 @@
                             <TextBlock Text="{Binding SummaryCroatian}" TextWrapping="Wrap"
                                        Foreground="{StaticResource TextPrimaryBrush}"
                                        Visibility="{Binding HasSummaryCroatian, Converter={StaticResource BoolToVisibilityConverter}}"/>
-                            <TextBlock Text="No AI summary available. Click 'Get Full Details' first."
+                            <TextBlock Text="No AI summary available yet."
                                        FontStyle="Italic" Foreground="{StaticResource TextSecondaryBrush}">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">

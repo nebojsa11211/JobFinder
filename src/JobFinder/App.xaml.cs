@@ -49,6 +49,18 @@ public partial class App : Application
         var settingsService = _serviceProvider.GetRequiredService<ISettingsService>();
         await settingsService.LoadAsync();
 
+        // Validate Kimi API key
+        var kimiService = _serviceProvider.GetRequiredService<IKimiService>();
+        var (isValid, errorMessage) = await kimiService.ValidateApiKeyAsync();
+        if (!isValid)
+        {
+            MessageBox.Show(
+                $"{errorMessage}\n\nAI summaries will not be available until this is resolved.",
+                "Kimi AI Configuration Issue",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+
         var mainWindow = _serviceProvider.GetRequiredService<MainWindow>();
         var viewModel = _serviceProvider.GetRequiredService<MainViewModel>();
 
