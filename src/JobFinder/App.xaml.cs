@@ -10,11 +10,14 @@ public partial class App : Application
 {
     private readonly ServiceProvider _serviceProvider;
 
+    public static IServiceProvider Services { get; private set; } = null!;
+
     public App()
     {
         var services = new ServiceCollection();
         ConfigureServices(services);
         _serviceProvider = services.BuildServiceProvider();
+        Services = _serviceProvider;
     }
 
     private static void ConfigureServices(ServiceCollection services)
@@ -24,18 +27,27 @@ public partial class App : Application
 
         // Services
         services.AddSingleton<ILinkedInService, LinkedInService>();
+        services.AddSingleton<ISettingsService, SettingsService>();
+        services.AddSingleton<IKimiService, KimiService>();
         services.AddScoped<IJobRepository, JobRepository>();
+        services.AddScoped<ICompanyRepository, CompanyRepository>();
 
         // ViewModels
         services.AddTransient<MainViewModel>();
+        services.AddTransient<SettingsViewModel>();
 
         // Views
         services.AddTransient<MainWindow>();
+        services.AddTransient<SettingsWindow>();
     }
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // Load settings first
+        var settingsService = _serviceProvider.GetRequiredService<ISettingsService>();
+        await settingsService.LoadAsync();
 
         var mainWindow = _serviceProvider.GetRequiredService<MainWindow>();
         var viewModel = _serviceProvider.GetRequiredService<MainViewModel>();

@@ -11,6 +11,8 @@ public partial class MainViewModel : ObservableObject
 {
     private readonly IJobRepository _jobRepository;
     private readonly ILinkedInService _linkedInService;
+    private readonly IKimiService _kimiService;
+    private readonly ISettingsService _settingsService;
     private CancellationTokenSource? _searchCts;
 
     [ObservableProperty]
@@ -23,11 +25,9 @@ public partial class MainViewModel : ObservableObject
     private string _statusMessage = "Ready";
 
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(SearchJobsCommand))]
     private bool _isSearching;
 
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(SearchJobsCommand))]
     private bool _isLoggedIn;
 
     [ObservableProperty]
@@ -56,25 +56,77 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private ApplicationStatus? _statusFilter;
 
-    public MainViewModel(IJobRepository jobRepository, ILinkedInService linkedInService)
+    public MainViewModel(IJobRepository jobRepository, ILinkedInService linkedInService, IKimiService kimiService, ISettingsService settingsService)
     {
         _jobRepository = jobRepository;
         _linkedInService = linkedInService;
+        _kimiService = kimiService;
+        _settingsService = settingsService;
     }
 
     public async Task InitializeAsync()
     {
         await _jobRepository.InitializeDatabaseAsync();
         await LoadJobsAsync();
-        StatusMessage = $"Loaded {Jobs.Count} jobs from database";
+        StatusMessage = $"Loaded {Jobs.Count} jobs from database. Starting LinkedIn...";
+
+        // Auto-start LinkedIn and search
+        await RefreshAsync();
+    }
+
+    [RelayCommand]
+    private async Task RefreshAsync()
+    {
+        if (IsSearching) return;
+
+        try
+        {
+            // Open LinkedIn browser if not already open
+            if (!_linkedInService.IsBrowserOpen)
+            {
+                StatusMessage = "Opening LinkedIn...";
+                await _linkedInService.OpenLoginWindowAsync();
+                await Task.Delay(3000);
+            }
+
+            // Check login status
+            StatusMessage = "Checking login status...";
+            IsLoggedIn = await _linkedInService.CheckLoginStatusAsync();
+
+            if (!IsLoggedIn)
+            {
+                StatusMessage = "Please log in to LinkedIn in the browser window, then click Refresh again.";
+                return;
+            }
+
+            // Search for jobs
+            StatusMessage = "Logged in! Searching for jobs...";
+            await SearchJobsAsync();
+
+            // After search, fetch missing details for ALL existing jobs
+            IsSearching = true;
+            _searchCts = new CancellationTokenSource();
+            var allJobs = await _jobRepository.GetAllJobsAsync();
+            await FetchMissingDetailsAsync(allJobs, _searchCts.Token);
+            await LoadJobsAsync();
+            IsSearching = false;
+            SearchProgress = "";
+            StatusMessage = "Done.";
+        }
+        catch (Exception ex)
+        {
+            IsSearching = false;
+            StatusMessage = $"Error: {ex.Message}";
+        }
     }
 
     [RelayCommand]
     private async Task LoadJobsAsync()
     {
+        var includeDiscarded = _settingsService.Settings.ShowDiscardedJobs;
         var jobs = StatusFilter.HasValue
-            ? await _jobRepository.GetJobsByStatusAsync(StatusFilter.Value)
-            : await _jobRepository.GetAllJobsAsync();
+            ? await _jobRepository.GetJobsByStatusAsync(StatusFilter.Value, includeDiscarded)
+            : await _jobRepository.GetAllJobsAsync(includeDiscarded);
 
         Jobs.Clear();
         foreach (var job in jobs)
@@ -83,39 +135,6 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
-    private async Task OpenLoginAsync()
-    {
-        try
-        {
-            StatusMessage = "Opening LinkedIn login...";
-            await _linkedInService.OpenLoginWindowAsync();
-            StatusMessage = "Please log in to LinkedIn. Click 'Check Login' when done.";
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"Error opening browser: {ex.Message}";
-        }
-    }
-
-    [RelayCommand]
-    private async Task CheckLoginAsync()
-    {
-        try
-        {
-            StatusMessage = "Checking login status...";
-            IsLoggedIn = await _linkedInService.CheckLoginStatusAsync();
-            StatusMessage = IsLoggedIn
-                ? "Successfully logged in to LinkedIn!"
-                : "Not logged in. Please complete the login process.";
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"Error checking login: {ex.Message}";
-        }
-    }
-
-    [RelayCommand(CanExecute = nameof(CanSearch))]
     private async Task SearchJobsAsync()
     {
         if (!IsLoggedIn)
@@ -146,14 +165,19 @@ public partial class MainViewModel : ObservableObject
 
             var foundJobs = await _linkedInService.SearchJobsAsync(filter, progress, _searchCts.Token);
 
-            // Save to database
-            var jobEntities = foundJobs.Select(j => j).ToList();
-            await _jobRepository.AddJobsAsync(jobEntities);
+            // Save to database (only adds new jobs)
+            var newJobsCount = await _jobRepository.AddJobsAsync(foundJobs);
+
+            // Fetch details for new jobs
+            if (newJobsCount > 0)
+            {
+                await FetchMissingDetailsAsync(foundJobs, _searchCts.Token);
+            }
 
             // Refresh the list
             await LoadJobsAsync();
 
-            StatusMessage = $"Search complete. Found {foundJobs.Count} jobs.";
+            StatusMessage = $"Done. Found {foundJobs.Count} jobs, {newJobsCount} new.";
         }
         catch (OperationCanceledException)
         {
@@ -169,8 +193,6 @@ public partial class MainViewModel : ObservableObject
             SearchProgress = "";
         }
     }
-
-    private bool CanSearch() => IsLoggedIn && !IsSearching;
 
     [RelayCommand]
     private void CancelSearch()
@@ -252,6 +274,45 @@ public partial class MainViewModel : ObservableObject
         await _jobRepository.UpdateJobStatusAsync(SelectedJob.Id, ApplicationStatus.Ignored);
         SelectedJob.Status = ApplicationStatus.Ignored;
         StatusMessage = $"Ignored '{SelectedJob.Title}'.";
+    }
+
+    [RelayCommand]
+    private async Task DiscardJobAsync()
+    {
+        if (SelectedJob == null) return;
+
+        var jobTitle = SelectedJob.Title;
+        await _jobRepository.DiscardJobAsync(SelectedJob.Id);
+
+        // If not showing discarded jobs, remove from list
+        if (!_settingsService.Settings.ShowDiscardedJobs)
+        {
+            Jobs.Remove(SelectedJob);
+            SelectedJob = null;
+        }
+        else
+        {
+            SelectedJob.IsDiscarded = true;
+        }
+        StatusMessage = $"Discarded '{jobTitle}'.";
+    }
+
+    [RelayCommand]
+    private async Task RestoreJobAsync()
+    {
+        if (SelectedJob == null) return;
+
+        await _jobRepository.RestoreJobAsync(SelectedJob.Id);
+        SelectedJob.IsDiscarded = false;
+        StatusMessage = $"Restored '{SelectedJob.Title}'.";
+    }
+
+    [RelayCommand]
+    private async Task RestoreAllJobsAsync()
+    {
+        var count = await _jobRepository.RestoreAllJobsAsync();
+        await LoadJobsAsync();
+        StatusMessage = $"Restored {count} discarded jobs.";
     }
 
     [RelayCommand]
@@ -338,11 +399,226 @@ public partial class MainViewModel : ObservableObject
         StatusMessage = "Browser closed.";
     }
 
+    [RelayCommand]
+    private async Task ReanalyzeAllJobsAsync()
+    {
+        if (!_kimiService.IsConfigured)
+        {
+            StatusMessage = "Kimi API key not configured. Go to Settings to add it.";
+            return;
+        }
+
+        if (IsSearching)
+        {
+            StatusMessage = "Please wait for current operation to complete.";
+            return;
+        }
+
+        IsSearching = true;
+        _searchCts = new CancellationTokenSource();
+
+        try
+        {
+            // Get all non-discarded jobs with descriptions
+            var allJobs = await _jobRepository.GetAllJobsAsync(includeDiscarded: false);
+            var jobsToAnalyze = allJobs.Where(j => !string.IsNullOrEmpty(j.Description)).ToList();
+
+            if (jobsToAnalyze.Count == 0)
+            {
+                StatusMessage = "No jobs with descriptions to analyze.";
+                return;
+            }
+
+            SearchProgress = $"Re-analyzing {jobsToAnalyze.Count} jobs...";
+            StatusMessage = SearchProgress;
+            int analyzed = 0;
+
+            foreach (var job in jobsToAnalyze)
+            {
+                if (_searchCts.Token.IsCancellationRequested) break;
+
+                try
+                {
+                    var result = await _kimiService.GetSummaryAsync(job.Description!, _searchCts.Token);
+                    if (result != null && !string.IsNullOrEmpty(result.Summary))
+                    {
+                        job.SummaryCroatian = result.Summary;
+                        job.ShortSummary = result.ShortSummary;
+                        job.Rating = result.Rating;
+                        job.DiscardReason = result.DiscardReason;
+
+                        // Auto-discard disabled - just save the analysis results
+                        // User can manually discard later based on rating/recommendation
+                        // Store the AI's recommendation for reference
+                        if (result.ShouldDiscard && string.IsNullOrEmpty(job.DiscardReason))
+                        {
+                            job.DiscardReason = result.DiscardReason ?? "AI recommended discard";
+                        }
+
+                        await _jobRepository.UpdateJobAsync(job);
+                        analyzed++;
+
+                        var parseWarning = result.ParseFailed ? " ⚠️PARSE FAILED" : "";
+                        var discardRecommendation = result.ShouldDiscard ? " [AI: discard]" : "";
+                        SearchProgress = $"Re-analyzed {analyzed}/{jobsToAnalyze.Count}: {job.Title} (Rating: {result.Rating}/10){discardRecommendation}{parseWarning}";
+                        StatusMessage = SearchProgress;
+                    }
+                }
+                catch
+                {
+                    // Skip failed analyses
+                }
+
+                // Delay between API calls
+                await Task.Delay(1000, _searchCts.Token);
+            }
+
+            await LoadJobsAsync();
+            StatusMessage = $"Re-analysis complete. Processed {analyzed} jobs.";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "Re-analysis cancelled.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Re-analysis error: {ex.Message}";
+        }
+        finally
+        {
+            IsSearching = false;
+            SearchProgress = "";
+        }
+    }
+
     private List<string> GetSelectedExperienceLevels()
     {
         var levels = new List<string>();
         if (FilterMidLevel) levels.Add("Mid-Senior level");
         if (FilterSeniorLevel) levels.Add("Senior");
         return levels;
+    }
+
+    private async Task FetchMissingDetailsAsync(IEnumerable<Job> jobs, CancellationToken cancellationToken)
+    {
+        var jobsList = jobs.ToList();
+        var jobsWithoutDetails = jobsList.Where(j => !j.IsDiscarded && string.IsNullOrEmpty(j.Description) && !string.IsNullOrEmpty(j.JobUrl)).ToList();
+
+        if (jobsWithoutDetails.Count > 0)
+        {
+            SearchProgress = $"Fetching details for {jobsWithoutDetails.Count} jobs...";
+            StatusMessage = SearchProgress;
+            int detailsFetched = 0;
+
+            foreach (var job in jobsWithoutDetails)
+            {
+                if (cancellationToken.IsCancellationRequested) break;
+
+                try
+                {
+                    var details = await _linkedInService.GetJobDetailsAsync(job.JobUrl!);
+                    if (details != null)
+                    {
+                        job.Description = details.Description;
+                        job.HasEasyApply = details.HasEasyApply;
+                        job.ExternalApplyUrl = details.ExternalApplyUrl;
+                        job.RecruiterEmail = details.RecruiterEmail;
+
+                        // Update in database
+                        var dbJob = await _jobRepository.GetJobByLinkedInIdAsync(job.LinkedInJobId);
+                        if (dbJob != null)
+                        {
+                            dbJob.Description = details.Description;
+                            dbJob.HasEasyApply = details.HasEasyApply;
+                            dbJob.ExternalApplyUrl = details.ExternalApplyUrl;
+                            dbJob.RecruiterEmail = details.RecruiterEmail;
+                            await _jobRepository.UpdateJobAsync(dbJob);
+                        }
+
+                        detailsFetched++;
+                        SearchProgress = $"Fetched details {detailsFetched}/{jobsWithoutDetails.Count}: {job.Title}";
+                        StatusMessage = SearchProgress;
+                    }
+                }
+                catch
+                {
+                    // Skip failed fetches
+                }
+
+                // Small delay to avoid rate limiting
+                await Task.Delay(500, cancellationToken);
+            }
+        }
+
+        // Always try to fetch AI summaries for jobs missing Croatian summary
+        await FetchMissingSummariesAsync(jobsList, cancellationToken);
+    }
+
+    private async Task FetchMissingSummariesAsync(IEnumerable<Job> jobs, CancellationToken cancellationToken)
+    {
+        if (!_kimiService.IsConfigured)
+        {
+            StatusMessage = "Kimi API key not configured. Go to Settings to add it.";
+            return;
+        }
+
+        var jobsWithoutSummary = jobs.Where(j =>
+            !j.IsDiscarded &&
+            !string.IsNullOrEmpty(j.Description) &&
+            string.IsNullOrEmpty(j.SummaryCroatian)).ToList();
+
+        if (jobsWithoutSummary.Count == 0) return;
+
+        SearchProgress = $"Getting AI summaries for {jobsWithoutSummary.Count} jobs...";
+        StatusMessage = SearchProgress;
+        int summariesFetched = 0;
+
+        foreach (var job in jobsWithoutSummary)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+
+            try
+            {
+                var result = await _kimiService.GetSummaryAsync(job.Description!, cancellationToken);
+                if (result != null && !string.IsNullOrEmpty(result.Summary))
+                {
+                    job.SummaryCroatian = result.Summary;
+                    job.ShortSummary = result.ShortSummary;
+                    job.Rating = result.Rating;
+                    job.DiscardReason = result.DiscardReason;
+
+                    // Auto-discard disabled - just save the analysis results
+                    // Store the AI's recommendation for reference
+                    if (result.ShouldDiscard && string.IsNullOrEmpty(job.DiscardReason))
+                    {
+                        job.DiscardReason = result.DiscardReason ?? "AI recommended discard";
+                    }
+
+                    // Update in database
+                    var dbJob = await _jobRepository.GetJobByLinkedInIdAsync(job.LinkedInJobId);
+                    if (dbJob != null)
+                    {
+                        dbJob.SummaryCroatian = result.Summary;
+                        dbJob.ShortSummary = result.ShortSummary;
+                        dbJob.Rating = result.Rating;
+                        dbJob.DiscardReason = job.DiscardReason;
+                        await _jobRepository.UpdateJobAsync(dbJob);
+                    }
+
+                    summariesFetched++;
+                    var parseWarning = result.ParseFailed ? " ⚠️PARSE FAILED" : "";
+                    var discardRecommendation = result.ShouldDiscard ? " [AI: discard]" : "";
+                    SearchProgress = $"AI summary {summariesFetched}/{jobsWithoutSummary.Count}: {job.Title} (Rating: {result.Rating}/10){discardRecommendation}{parseWarning}";
+                    StatusMessage = SearchProgress;
+                }
+            }
+            catch
+            {
+                // Skip failed summaries
+            }
+
+            // Delay between API calls
+            await Task.Delay(1000, cancellationToken);
+        }
     }
 }

@@ -42,7 +42,7 @@
                                ToolTip="LinkedIn Job Finder - Search and manage job applications"/>
                 </StackPanel>
 
-                <!-- Login Controls -->
+                <!-- Status -->
                 <StackPanel x:Name="LoginControlsPanel" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                     <Ellipse x:Name="ConnectionStatusIndicator" Width="12" Height="12" Margin="0,0,8,0"
                              ToolTip="Connection status indicator - Green when connected, Red when disconnected">
@@ -70,15 +70,12 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
-                    <Button x:Name="OpenLinkedInButton" Content="Open LinkedIn" Style="{StaticResource PrimaryButton}"
-                            Command="{Binding OpenLoginCommand}" Margin="0,0,8,0"
-                            ToolTip="Open LinkedIn login page in browser. Log in manually to handle 2FA authentication."/>
-                    <Button x:Name="CheckLoginButton" Content="Check Login" Style="{StaticResource SecondaryButton}"
-                            Command="{Binding CheckLoginCommand}" Margin="0,0,8,0"
-                            ToolTip="Verify if you are successfully logged into LinkedIn"/>
+                    <Button x:Name="SettingsButton" Content="Settings" Style="{StaticResource SecondaryButton}"
+                            Click="SettingsButton_Click" Margin="0,0,8,0"
+                            ToolTip="Configure Kimi K2 AI settings"/>
                     <Button x:Name="CloseBrowserButton" Content="Close Browser" Style="{StaticResource SecondaryButton}"
                             Command="{Binding CloseBrowserCommand}"
-                            ToolTip="Close the automated browser session and disconnect from LinkedIn"/>
+                            ToolTip="Close the automated browser session"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -88,7 +85,6 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="280"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="320"/>
             </Grid.ColumnDefinitions>
 
             <!-- Left Panel - Filters -->
@@ -134,21 +130,20 @@
                                  Padding="8" Margin="0,0,0,16"
                                  ToolTip="Enter the maximum number of job results to fetch (e.g., 50, 100)"/>
 
-                        <!-- Search Button -->
-                        <Button x:Name="SearchJobsButton" Style="{StaticResource PrimaryButton}"
-                                Command="{Binding SearchJobsCommand}"
-                                IsEnabled="{Binding IsLoggedIn}"
+                        <!-- Refresh Button -->
+                        <Button x:Name="RefreshButton" Style="{StaticResource PrimaryButton}"
+                                Command="{Binding RefreshCommand}"
                                 Margin="0,0,0,8"
-                                ToolTip="Start searching for jobs on LinkedIn with the specified filters. You must be logged in first.">
+                                ToolTip="Open LinkedIn, check login, and search for new jobs">
                             <Button.Content>
-                                <TextBlock Text="Search Jobs" VerticalAlignment="Center"/>
+                                <TextBlock Text="Refresh" VerticalAlignment="Center"/>
                             </Button.Content>
                         </Button>
 
-                        <Button x:Name="CancelSearchButton" Content="Cancel Search" Style="{StaticResource SecondaryButton}"
+                        <Button x:Name="CancelSearchButton" Content="Cancel" Style="{StaticResource SecondaryButton}"
                                 Command="{Binding CancelSearchCommand}"
                                 Visibility="{Binding IsSearching, Converter={StaticResource BoolToVisibilityConverter}}"
-                                ToolTip="Cancel the current job search operation"/>
+                                ToolTip="Cancel the current operation"/>
 
                         <!-- Progress -->
                         <TextBlock x:Name="SearchProgressText" Text="{Binding SearchProgress}" TextWrapping="Wrap"
@@ -197,8 +192,8 @@
 
             <!-- Center Panel - Job List -->
             <Border x:Name="JobListPanelBorder" Grid.Column="1" Background="{StaticResource CardBrush}"
-                    CornerRadius="8" Margin="8,0"
-                    ToolTip="Job listings panel - View and select jobs from search results">
+                    CornerRadius="8" Margin="8,0,0,0"
+                    ToolTip="Job listings panel - Double-click a job to view details">
                 <Grid x:Name="JobListGrid">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -207,13 +202,66 @@
 
                     <Border x:Name="JobListHeaderBorder" Grid.Row="0" Padding="16" BorderThickness="0,0,0,1" BorderBrush="#E0E0E0">
                         <Grid x:Name="JobListHeaderGrid">
-                            <TextBlock x:Name="JobsHeaderText" Text="Jobs" FontSize="16" FontWeight="SemiBold"
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="JobsHeaderText" Grid.Column="0" Text="Jobs" FontSize="16" FontWeight="SemiBold"
+                                       VerticalAlignment="Center"
                                        ToolTip="List of jobs matching your search criteria"/>
-                            <TextBlock x:Name="JobsCountText" HorizontalAlignment="Right" Foreground="{StaticResource TextSecondaryBrush}"
+                            <TextBlock x:Name="JobsCountText" Grid.Column="1" HorizontalAlignment="Left" Margin="12,0,0,0"
+                                       VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}"
                                        ToolTip="Total number of jobs in the current view">
-                                <Run Text="{Binding Jobs.Count, Mode=OneWay}"/>
-                                <Run Text="jobs found"/>
+                                <Run Text="("/><Run Text="{Binding Jobs.Count, Mode=OneWay}"/><Run Text=" found)"/>
                             </TextBlock>
+                            <Button x:Name="RestoreAllButton" Grid.Column="2" Content="Restore All"
+                                    Padding="12,6" FontSize="12" Margin="0,0,8,0"
+                                    Command="{Binding RestoreAllJobsCommand}"
+                                    ToolTip="Restore all discarded jobs">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                                        <Setter Property="IsEnabled" Value="True"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsSearching}" Value="True">
+                                                <Setter Property="IsEnabled" Value="False"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <Button x:Name="ReanalyzeButton" Grid.Column="3" Content="Re-analyze All"
+                                    Padding="12,6" FontSize="12" Margin="0,0,8,0"
+                                    Command="{Binding ReanalyzeAllJobsCommand}"
+                                    ToolTip="Re-run AI analysis on all jobs to update ratings and summaries">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                                        <Setter Property="IsEnabled" Value="True"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsSearching}" Value="True">
+                                                <Setter Property="IsEnabled" Value="False"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                            <Button x:Name="OpenDetailsButton" Grid.Column="4" Content="Open Details"
+                                    Padding="12,6" FontSize="12"
+                                    Click="OpenDetailsButton_Click"
+                                    ToolTip="Open selected job details in a new window (or double-click a row)">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                                        <Setter Property="IsEnabled" Value="True"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedJob}" Value="{x:Null}">
+                                                <Setter Property="IsEnabled" Value="False"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
                         </Grid>
                     </Border>
 
@@ -227,26 +275,59 @@
                               BorderThickness="0"
                               RowHeight="48"
                               CanUserResizeRows="False"
-                              ToolTip="Click on a job to view its details. Double-click to open in browser.">
+                              MouseDoubleClick="JobsDataGrid_MouseDoubleClick"
+                              ToolTip="Double-click a job to open its details in a separate window">
                         <DataGrid.Columns>
-                            <DataGridTextColumn x:Name="TitleColumn" Header="Title" Binding="{Binding Title}" Width="*" MinWidth="150">
-                                <DataGridTextColumn.HeaderStyle>
+                            <DataGridTemplateColumn x:Name="TitleColumn" Header="Title" Width="*" MinWidth="200">
+                                <DataGridTemplateColumn.HeaderStyle>
                                     <Style TargetType="DataGridColumnHeader">
-                                        <Setter Property="ToolTip" Value="Job title or position name"/>
+                                        <Setter Property="ToolTip" Value="Job title and AI-generated summary"/>
                                     </Style>
-                                </DataGridTextColumn.HeaderStyle>
-                            </DataGridTextColumn>
-                            <DataGridTextColumn x:Name="CompanyColumn" Header="Company" Binding="{Binding Company}" Width="150">
+                                </DataGridTemplateColumn.HeaderStyle>
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel VerticalAlignment="Center" Margin="4,2">
+                                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding ShortSummary}" FontSize="11"
+                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Visibility="{Binding HasShortSummary, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn x:Name="CompanyColumn" Header="Company" Binding="{Binding CompanyName}" Width="150">
                                 <DataGridTextColumn.HeaderStyle>
                                     <Style TargetType="DataGridColumnHeader">
                                         <Setter Property="ToolTip" Value="Company or organization offering the position"/>
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn x:Name="LocationColumn" Header="Location" Binding="{Binding Location}" Width="120">
+                            <DataGridTextColumn x:Name="LocationColumn" Header="Town/Country" Binding="{Binding Location}" Width="140">
                                 <DataGridTextColumn.HeaderStyle>
                                     <Style TargetType="DataGridColumnHeader">
-                                        <Setter Property="ToolTip" Value="Job location or 'Remote' for remote positions"/>
+                                        <Setter Property="ToolTip" Value="Town and country of the job location"/>
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn x:Name="RatingColumn" Header="Rating" Binding="{Binding RatingDisplay}" Width="60">
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader">
+                                        <Setter Property="ToolTip" Value="AI-assigned rating from 1-10 based on job match"/>
+                                    </Style>
+                                </DataGridTextColumn.HeaderStyle>
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="HorizontalAlignment" Value="Center"/>
+                                        <Setter Property="FontWeight" Value="Medium"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn x:Name="ScrapedColumn" Header="Scraped" Binding="{Binding DateScrapedFormatted}" Width="95">
+                                <DataGridTextColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader">
+                                        <Setter Property="ToolTip" Value="Date and time when this job was scraped from LinkedIn"/>
                                     </Style>
                                 </DataGridTextColumn.HeaderStyle>
                             </DataGridTextColumn>
@@ -280,10 +361,25 @@
                                                         <DataTrigger Binding="{Binding Status}" Value="Ignored">
                                                             <Setter Property="Background" Value="#FCE8E8"/>
                                                         </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsDiscarded}" Value="True">
+                                                            <Setter Property="Background" Value="#D0D0D0"/>
+                                                        </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </Border.Style>
-                                            <TextBlock x:Name="StatusText" Text="{Binding StatusDisplay}" FontSize="11"/>
+                                            <TextBlock x:Name="StatusText" FontSize="11">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Text" Value="{Binding StatusDisplay}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsDiscarded}" Value="True">
+                                                                <Setter Property="Text" Value="Discarded"/>
+                                                                <Setter Property="Foreground" Value="#666666"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
                                         </Border>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
@@ -322,166 +418,6 @@
                 </Grid>
             </Border>
 
-            <!-- Right Panel - Job Details -->
-            <Border x:Name="JobDetailsPanelBorder" Grid.Column="2" Background="{StaticResource CardBrush}"
-                    CornerRadius="8" Padding="16" Margin="8,0,0,0"
-                    ToolTip="Job details panel - View full information about the selected job">
-                <Grid x:Name="JobDetailsGrid">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-
-                    <StackPanel x:Name="JobDetailsHeaderPanel" Grid.Row="0">
-                        <TextBlock x:Name="JobDetailsHeaderText" Text="Job Details" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,16"
-                                   ToolTip="Detailed information about the selected job"/>
-                    </StackPanel>
-
-                    <!-- No Selection Message -->
-                    <TextBlock x:Name="NoSelectionText" Grid.Row="1" Text="Select a job to view details"
-                               Foreground="{StaticResource TextSecondaryBrush}"
-                               VerticalAlignment="Top"
-                               ToolTip="Click on a job in the list to see its details here">
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="Visibility" Value="Collapsed"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SelectedJob}" Value="{x:Null}">
-                                        <Setter Property="Visibility" Value="Visible"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-
-                    <!-- Job Details Content -->
-                    <ScrollViewer x:Name="JobDetailsScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                        <ScrollViewer.Style>
-                            <Style TargetType="ScrollViewer">
-                                <Setter Property="Visibility" Value="Visible"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SelectedJob}" Value="{x:Null}">
-                                        <Setter Property="Visibility" Value="Collapsed"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </ScrollViewer.Style>
-                        <StackPanel x:Name="JobDetailsContentPanel" DataContext="{Binding SelectedJob}">
-                            <TextBlock x:Name="JobTitleDetailText" Text="{Binding Title}" FontSize="18" FontWeight="SemiBold"
-                                       TextWrapping="Wrap" Margin="0,0,0,4"
-                                       ToolTip="Full job title"/>
-                            <TextBlock x:Name="CompanyDetailText" Text="{Binding Company}" FontSize="14"
-                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,4"
-                                       ToolTip="Hiring company name"/>
-                            <TextBlock x:Name="LocationDetailText" Text="{Binding Location}" FontSize="13"
-                                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,12"
-                                       ToolTip="Job location"/>
-
-                            <!-- Status Badge -->
-                            <Border x:Name="DetailStatusBadge" CornerRadius="4" Padding="8,4" HorizontalAlignment="Left" Margin="0,0,0,12"
-                                    ToolTip="Your current application status for this job">
-                                <Border.Style>
-                                    <Style TargetType="Border">
-                                        <Setter Property="Background" Value="#E8E8E8"/>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Status}" Value="Applied">
-                                                <Setter Property="Background" Value="#E6F4EA"/>
-                                            </DataTrigger>
-                                            <DataTrigger Binding="{Binding Status}" Value="Saved">
-                                                <Setter Property="Background" Value="#FEF7E0"/>
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
-                                <TextBlock x:Name="DetailStatusText" Text="{Binding StatusDisplay}" FontSize="12"/>
-                            </Border>
-
-                            <!-- Easy Apply Badge -->
-                            <Border x:Name="EasyApplyBadge" CornerRadius="4" Padding="8,4" Background="#E6F4EA"
-                                    HorizontalAlignment="Left" Margin="0,0,0,12"
-                                    Visibility="{Binding HasEasyApply, Converter={StaticResource BoolToVisibilityConverter}}"
-                                    ToolTip="This job supports LinkedIn Easy Apply for quick applications">
-                                <TextBlock x:Name="EasyApplyBadgeText" Text="Easy Apply Available" FontSize="12"
-                                           Foreground="{StaticResource SuccessBrush}" FontWeight="Medium"/>
-                            </Border>
-
-                            <!-- Recruiter Email -->
-                            <StackPanel x:Name="RecruiterEmailPanel" Visibility="{Binding HasRecruiterEmail, Converter={StaticResource BoolToVisibilityConverter}}"
-                                        Margin="0,0,0,12"
-                                        ToolTip="Recruiter contact email extracted from job description">
-                                <TextBlock x:Name="RecruiterEmailLabel" Text="Recruiter Email:" FontWeight="Medium" Margin="0,0,0,4"/>
-                                <Grid x:Name="RecruiterEmailGrid">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock x:Name="RecruiterEmailText" Text="{Binding RecruiterEmail}" Foreground="{StaticResource PrimaryBrush}"
-                                               TextWrapping="Wrap"
-                                               ToolTip="Click Copy to copy email to clipboard"/>
-                                    <Button x:Name="CopyEmailButton" Grid.Column="1" Content="Copy" Style="{StaticResource SecondaryButton}"
-                                            Padding="8,4" FontSize="11"
-                                            Command="{Binding DataContext.CopyRecruiterEmailCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                            ToolTip="Copy recruiter email to clipboard"/>
-                                </Grid>
-                            </StackPanel>
-
-                            <!-- Description -->
-                            <TextBlock x:Name="DescriptionLabel" Text="Description" FontWeight="Medium" Margin="0,0,0,8"
-                                       ToolTip="Full job description"/>
-                            <TextBlock x:Name="DescriptionText" Text="{Binding Description}" TextWrapping="Wrap"
-                                       Foreground="{StaticResource TextSecondaryBrush}"
-                                       ToolTip="Job description and requirements. Click 'Get Full Details' to load if empty."/>
-                        </StackPanel>
-                    </ScrollViewer>
-
-                    <!-- Action Buttons -->
-                    <StackPanel x:Name="ActionButtonsPanel" Grid.Row="2">
-                        <StackPanel.Style>
-                            <Style TargetType="StackPanel">
-                                <Setter Property="Visibility" Value="Visible"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding SelectedJob}" Value="{x:Null}">
-                                        <Setter Property="Visibility" Value="Collapsed"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </StackPanel.Style>
-
-                        <Separator x:Name="ActionsSeparator" Margin="0,16"/>
-
-                        <Button x:Name="GetFullDetailsButton" Content="Get Full Details" Style="{StaticResource SecondaryButton}"
-                                Command="{Binding GetJobDetailsCommand}" Margin="0,0,0,8"
-                                ToolTip="Fetch complete job description, recruiter email, and external apply links from LinkedIn"/>
-
-                        <Button x:Name="ApplyToJobButton" Content="Apply to Job" Style="{StaticResource PrimaryButton}"
-                                Command="{Binding ApplyToJobCommand}" Margin="0,0,0,8"
-                                ToolTip="Start the application process. Opens Easy Apply or external application link."/>
-
-                        <Button x:Name="OpenInBrowserButton" Content="Open in Browser" Style="{StaticResource SecondaryButton}"
-                                Command="{Binding OpenJobInBrowserCommand}" Margin="0,0,0,8"
-                                ToolTip="Open this job posting in your default web browser"/>
-
-                        <Grid x:Name="StatusActionsGrid" Margin="0,8,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-
-                            <Button x:Name="SaveJobButton" Grid.Column="0" Content="Save" Style="{StaticResource SecondaryButton}"
-                                    Command="{Binding MarkAsSavedCommand}" Margin="0,0,4,0"
-                                    ToolTip="Save this job for later review"/>
-                            <Button x:Name="MarkAppliedButton" Grid.Column="1" Content="Applied" Style="{StaticResource SecondaryButton}"
-                                    Command="{Binding MarkAsAppliedCommand}" Margin="2,0"
-                                    ToolTip="Mark this job as applied"/>
-                            <Button x:Name="IgnoreJobButton" Grid.Column="2" Content="Ignore" Style="{StaticResource SecondaryButton}"
-                                    Command="{Binding MarkAsIgnoredCommand}" Margin="4,0,0,0"
-                                    ToolTip="Ignore this job and hide it from the New list"/>
-                        </Grid>
-                    </StackPanel>
-                </Grid>
-            </Border>
         </Grid>
 
         <!-- Status Bar -->

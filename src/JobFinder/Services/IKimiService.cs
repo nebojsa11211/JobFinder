@@ -1,0 +1,9 @@
+using JobFinder.Models;
+
+namespace JobFinder.Services;
+
+public interface IKimiService
+{
+    Task<JobSummaryResult?> GetSummaryAsync(string jobDescription, CancellationToken cancellationToken = default);
+    bool IsConfigured { get; }
+}

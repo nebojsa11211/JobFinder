@@ -1,0 +1,124 @@
+<Window x:Class="JobFinder.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:JobFinder.ViewModels"
+        mc:Ignorable="d"
+        Title="Settings - Kimi K2 AI Configuration"
+        Height="600" Width="700"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource BackgroundBrush}"
+        d:DataContext="{d:DesignInstance Type=vm:SettingsViewModel}">
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,24">
+            <TextBlock Text="Kimi K2 AI Settings" FontSize="24" FontWeight="SemiBold"
+                       Foreground="{StaticResource PrimaryBrush}"/>
+            <TextBlock Text="Configure AI summarization and translation settings"
+                       Foreground="{StaticResource TextSecondaryBrush}" Margin="0,4,0,0"/>
+        </StackPanel>
+
+        <!-- Settings Form -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <!-- API Key -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="API Key" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBlock Text="Your Kimi K2 API key from Moonshot AI"
+                                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" Margin="0,0,0,8"/>
+                        <PasswordBox x:Name="ApiKeyBox" Padding="8" FontSize="14"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- API Base URL -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="API Base URL" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBlock Text="Base URL for the Kimi API (default: https://api.moonshot.ai/v1)"
+                                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" Margin="0,0,0,8"/>
+                        <TextBox Text="{Binding KimiApiBaseUrl, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="8" FontSize="14"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Model -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Model" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBlock Text="Kimi model to use (default: kimi-k2-0711-preview)"
+                                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" Margin="0,0,0,8"/>
+                        <TextBox Text="{Binding KimiModel, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="8" FontSize="14"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Prompt Template -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Summary Prompt Template" FontWeight="SemiBold"/>
+                            <Button Grid.Column="1" Content="Reset to Default" Style="{StaticResource SecondaryButton}"
+                                    Padding="8,4" FontSize="12" Command="{Binding ResetPromptCommand}"/>
+                        </Grid>
+                        <TextBlock Text="Use {description} as placeholder for the job description"
+                                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" Margin="0,8,0,8"/>
+                        <TextBox Text="{Binding SummaryPrompt, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="8" FontSize="13" FontFamily="Consolas"
+                                 AcceptsReturn="True" TextWrapping="Wrap"
+                                 Height="200" VerticalScrollBarVisibility="Auto"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Display Options -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Display Options" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                        <CheckBox IsChecked="{Binding ShowDiscardedJobs}" Content="Show discarded jobs in job list"
+                                  ToolTip="When enabled, discarded jobs will be visible in the job list"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Browser Options -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Browser Options" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                        <CheckBox IsChecked="{Binding StartBrowserMinimized}" Content="Start browser minimized"
+                                  ToolTip="When enabled, the browser window starts minimized instead of maximized"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Footer -->
+        <Border Grid.Row="2" Margin="0,16,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource SuccessBrush}"
+                           VerticalAlignment="Center"/>
+
+                <Button Grid.Column="1" Content="Cancel" Style="{StaticResource SecondaryButton}"
+                        Margin="0,0,8,0" Click="CancelButton_Click"/>
+                <Button Grid.Column="2" Content="Save" Style="{StaticResource PrimaryButton}"
+                        Command="{Binding SaveCommand}" Click="SaveButton_Click"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

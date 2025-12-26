@@ -8,6 +8,7 @@ namespace JobFinder.Services;
 
 public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 {
+    private readonly ISettingsService _settingsService;
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private IBrowserContext? _context;
@@ -18,8 +19,9 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
     public bool IsLoggedIn => _isLoggedIn;
     public bool IsBrowserOpen => _browser != null;
 
-    public LinkedInService()
+    public LinkedInService(ISettingsService settingsService)
     {
+        _settingsService = settingsService;
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         _userDataDir = Path.Combine(appData, "JobFinder", "browser-data");
         Directory.CreateDirectory(_userDataDir);
@@ -36,10 +38,14 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
             await InitializeAsync();
 
         // Launch browser in headed mode for manual login
+        var browserArgs = _settingsService.Settings.StartBrowserMinimized
+            ? new[] { "--start-minimized" }
+            : new[] { "--start-maximized" };
+
         _browser = await _playwright!.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
         {
             Headless = false,
-            Args = ["--start-maximized"]
+            Args = browserArgs
         });
 
         // Only load storage state if file exists (for returning users)
@@ -67,11 +73,28 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
         try
         {
-            // Check if we're on the feed page or have the nav bar
             var currentUrl = _page.Url;
-            _isLoggedIn = currentUrl.Contains("/feed") ||
-                          currentUrl.Contains("/jobs") ||
-                          await _page.Locator("nav.global-nav").CountAsync() > 0;
+
+            // If we're on the login page, we're not logged in
+            if (currentUrl.Contains("/login") || currentUrl.Contains("/checkpoint") || currentUrl.Contains("/authwall"))
+            {
+                _isLoggedIn = false;
+                return false;
+            }
+
+            // Check for authenticated-only elements that don't exist on public pages
+            // The global nav with profile menu is only visible when logged in
+            var profileNav = _page.Locator("div.global-nav__me, .nav-item__profile-member-photo, img.global-nav__me-photo, button[data-control-name='nav.settings']");
+            var hasProfileNav = await profileNav.CountAsync() > 0;
+
+            // Also check for the "Sign in" button - if it exists, we're NOT logged in
+            var signInButton = _page.Locator("a[href*='login'], a:has-text('Sign in')").First;
+            var hasSignInButton = await signInButton.CountAsync() > 0;
+
+            // Check if we're on the feed page (only accessible when logged in)
+            var isOnFeed = currentUrl.Contains("/feed") && !currentUrl.Contains("session_redirect");
+
+            _isLoggedIn = (hasProfileNav || isOnFeed) && !hasSignInButton;
 
             if (_isLoggedIn && _context != null)
             {
@@ -94,10 +117,15 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
     {
         var jobs = new List<Job>();
 
-        if (_page == null || !_isLoggedIn)
+        if (_page == null)
         {
-            progress?.Report("Not logged in. Please log in first.");
+            progress?.Report("Browser not open. Please open login window first.");
             return jobs;
+        }
+
+        if (!_isLoggedIn)
+        {
+            progress?.Report("Not logged in - searching public job listings (limited results)...");
         }
 
         try
@@ -108,6 +136,29 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
             await _page.GotoAsync(searchUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
             await Task.Delay(3000, cancellationToken);
+
+            // Verify we're still logged in (session might have expired)
+            var signInPrompt = await _page.Locator("button:has-text('Sign in'), a:has-text('Sign in')").CountAsync();
+            if (signInPrompt > 0)
+            {
+                // Check if it's just a small sign-in link in nav (acceptable) vs a login wall
+                var loginWall = await _page.Locator(".authwall-join-form, .login-form, [data-test-modal-id='join-now-modal']").CountAsync();
+                if (loginWall > 0)
+                {
+                    progress?.Report("Session expired. Please log in again.");
+                    _isLoggedIn = false;
+                    return jobs;
+                }
+            }
+
+            // Dismiss any cookie consent or promotional modals that might be blocking
+            try
+            {
+                // Use JavaScript to remove modals (more reliable than clicking)
+                await _page.EvaluateAsync("document.querySelectorAll('.top-level-modal-container, .contextual-sign-in-modal, [role=\"dialog\"]').forEach(el => el.remove())");
+                await Task.Delay(500, cancellationToken);
+            }
+            catch { /* Ignore modal dismissal errors */ }
 
             int pageNum = 0;
             int totalScraped = 0;
@@ -133,6 +184,30 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
                     var pageUrl = _page.Url;
                     progress?.Report($"Page: {pageTitle}");
                     progress?.Report($"URL: {pageUrl}");
+
+                    // Check if redirected to login
+                    if (pageUrl.Contains("/login") || pageUrl.Contains("/authwall") || pageUrl.Contains("/checkpoint"))
+                    {
+                        progress?.Report("Redirected to login page - session may have expired");
+                        _isLoggedIn = false;
+                        break;
+                    }
+
+                    // Try to find job list containers (different possible classes)
+                    var jobListCount = await _page.Locator(".jobs-search-results-list, .scaffold-layout__list-container, ul.jobs-search__results-list").CountAsync();
+                    progress?.Report($"Job list containers found: {jobListCount}");
+
+                    // Check for "no results" message
+                    var noResults = await _page.Locator("text=No matching jobs, text=No results found").CountAsync();
+                    if (noResults > 0)
+                    {
+                        progress?.Report("LinkedIn returned no matching jobs for this search");
+                        break;
+                    }
+
+                    // Try alternative selectors for job cards
+                    var altJobCards = await _page.Locator(".job-card-container, .jobs-search-results__list-item, li.jobs-search-results__list-item").CountAsync();
+                    progress?.Report($"Alternative job cards found: {altJobCards}");
 
                     // Try to find any links at all
                     var allLinksCount = await _page.Locator("a").CountAsync();
@@ -246,7 +321,7 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
                         {
                             LinkedInJobId = jobId,
                             Title = title,
-                            Company = company,
+                            ScrapedCompanyName = company,
                             Location = location,
                             JobUrl = href.StartsWith("http") ? href : $"https://www.linkedin.com{href}",
                             HasEasyApply = hasEasyApply,
@@ -257,7 +332,7 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
                         jobs.Add(job);
                         totalScraped++;
-                        progress?.Report($"Found: {job.Title} at {job.Company}");
+                        progress?.Report($"Found: {job.Title} at {job.ScrapedCompanyName}");
                     }
                     catch (Exception ex)
                     {
@@ -419,7 +494,7 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
         {
             LinkedInJobId = jobId,
             Title = title.Trim(),
-            Company = company.Trim(),
+            ScrapedCompanyName = company.Trim(),
             Location = location.Trim(),
             JobUrl = href.StartsWith("http") ? href : $"https://www.linkedin.com{href}",
             HasEasyApply = hasEasyApply,
@@ -431,54 +506,120 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
     public async Task<JobDetails?> GetJobDetailsAsync(string jobUrl)
     {
-        if (_page == null || !_isLoggedIn)
+        if (_page == null)
             return null;
 
         try
         {
-            await _page.GotoAsync(jobUrl, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            // Use JavaScript navigation to preserve session context
+            // Direct GotoAsync loses cookies and causes LinkedIn to block access
+            await _page.EvaluateAsync($"window.location.href = '{jobUrl.Replace("'", "\\'")}'");
+
+            // Wait for navigation to complete
+            try
+            {
+                await _page.WaitForLoadStateAsync(LoadState.NetworkIdle, new PageWaitForLoadStateOptions { Timeout = 10000 });
+            }
+            catch (TimeoutException)
+            {
+                // Continue even if timeout - page might still be usable
+            }
             await Task.Delay(2000);
+
+            // Dismiss any sign-in modals that might be blocking (common on public job pages)
+            try
+            {
+                // Remove modal via JavaScript (more reliable than clicking)
+                await _page.EvaluateAsync("document.querySelectorAll('.top-level-modal-container, .contextual-sign-in-modal').forEach(el => el.remove())");
+                await Task.Delay(300);
+            }
+            catch { }
 
             var details = new JobDetails();
 
-            // Get description - try multiple selectors
-            var descriptionElement = await _page.QuerySelectorAsync(".jobs-description-content__text, .jobs-description__content, .jobs-box__html-content, article.jobs-description");
-            if (descriptionElement != null)
+            // Try to click "Show more" button to expand the full description
+            try
             {
-                details.Description = await descriptionElement.InnerTextAsync();
+                var showMoreButton = _page.Locator("button:has-text('Show more')").First;
+                if (await showMoreButton.CountAsync() > 0 && await showMoreButton.IsVisibleAsync())
+                {
+                    await showMoreButton.ClickAsync();
+                    await Task.Delay(500);
+                }
+            }
+            catch { }
+
+            // Get description - try multiple selectors for both logged-in and public pages
+            // Public pages: description is in .description__text or .show-more-less-html__markup
+            // The content might be in various containers depending on the page version
+            string? description = null;
+
+            // Try public page selectors first
+            var selectors = new[]
+            {
+                ".show-more-less-html__markup",  // Public page expanded description
+                ".show-more-less-html",           // Public page description container
+                ".description__text",             // Another public page format
+                ".jobs-description-content__text", // Logged-in page
+                ".jobs-description__content",     // Logged-in page variant
+                ".jobs-box__html-content",        // Another variant
+                "article.jobs-description",       // Article-based layout
+                "section.description"             // Section-based layout
+            };
+
+            foreach (var selector in selectors)
+            {
+                var element = await _page.QuerySelectorAsync(selector);
+                if (element != null)
+                {
+                    description = await element.InnerTextAsync();
+                    if (!string.IsNullOrWhiteSpace(description) && description.Length > 50)
+                    {
+                        break;
+                    }
+                }
             }
 
-            // Check for Easy Apply button - try multiple selectors
-            var easyApplyButton = await _page.QuerySelectorAsync(".jobs-apply-button--top-card, .jobs-apply-button, button.jobs-apply-button, [data-job-apply-button]");
+            // Fallback: try to get description from the main content area by looking for job details section
+            if (string.IsNullOrWhiteSpace(description) || description.Length < 50)
+            {
+                // On public pages, description is often after the topcard in a specific section
+                var mainContent = await _page.QuerySelectorAsync("main section, .top-card-layout + section, .decorated-job-posting__details");
+                if (mainContent != null)
+                {
+                    var text = await mainContent.InnerTextAsync();
+                    // Extract just the description part (before "Seniority level" metadata)
+                    var seniorityIndex = text.IndexOf("Seniority level", StringComparison.OrdinalIgnoreCase);
+                    if (seniorityIndex > 100)
+                    {
+                        description = text.Substring(0, seniorityIndex).Trim();
+                    }
+                    else if (text.Length > 100)
+                    {
+                        description = text;
+                    }
+                }
+            }
+
+            details.Description = description;
+
+            // Check for Easy Apply button
+            var easyApplyButton = await _page.QuerySelectorAsync("button:has-text('Easy Apply'), .jobs-apply-button--top-card, .jobs-apply-button");
             if (easyApplyButton != null)
             {
                 var buttonText = await easyApplyButton.InnerTextAsync();
                 details.HasEasyApply = buttonText.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase);
             }
 
-            // Look for external apply link
-            if (easyApplyButton != null && !details.HasEasyApply)
+            // Look for external apply link (Apply button without Easy Apply)
+            if (!details.HasEasyApply)
             {
-                var applyText = await easyApplyButton.InnerTextAsync();
-                if (applyText.Contains("Apply", StringComparison.OrdinalIgnoreCase))
+                var applyButton = await _page.QuerySelectorAsync("button:has-text('Apply')");
+                if (applyButton != null)
                 {
-                    // Click to potentially get external URL
-                    await easyApplyButton.ClickAsync();
-                    await Task.Delay(1500);
-
-                    // Check for external link modal
-                    var externalLink = await _page.QuerySelectorAsync(".jobs-apply-button__external-link, a[data-tracking-control-name*='external'], .artdeco-modal a[href*='http']");
-                    if (externalLink != null)
-                    {
-                        details.ExternalApplyUrl = await externalLink.GetAttributeAsync("href");
-                    }
-
-                    // Close any modal that opened
-                    var closeButton = await _page.QuerySelectorAsync(".artdeco-modal__dismiss, button[data-test-modal-close-btn]");
-                    if (closeButton != null)
-                    {
-                        await closeButton.ClickAsync();
-                    }
+                    // On public pages, clicking Apply typically redirects to external site
+                    // We don't click it here to avoid navigation, but note the job may have external apply
+                    details.HasEasyApply = false;
                 }
             }
 
@@ -534,11 +675,21 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
     private string BuildSearchUrl(SearchFilter filter)
     {
+        // Use public jobs search URL format - MUST have trailing slash before query string
+        // Without trailing slash, LinkedIn redirects to authwall
         var baseUrl = "https://www.linkedin.com/jobs/search/?";
+
+        // Use + for spaces instead of %20 (LinkedIn prefers this format)
+        var keywords = filter.JobTitle.Replace(" ", "+");
         var parameters = new List<string>
         {
-            $"keywords={Uri.EscapeDataString(filter.JobTitle)}"
+            $"keywords={keywords}"
         };
+
+        // Location is REQUIRED for public job search to work without auth redirect
+        // If no location specified, default to "United States"
+        var location = filter.Locations.Count > 0 ? filter.Locations[0] : "United States";
+        parameters.Add($"location={location.Replace(" ", "+")}");
 
         // Remote filter (f_WT=2 means remote)
         if (filter.RemoteOnly)
@@ -560,14 +711,8 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
             parameters.Add($"f_E={string.Join(",", expLevels.Distinct())}");
         }
 
-        // Location
-        if (filter.Locations.Count > 0)
-        {
-            parameters.Add($"location={Uri.EscapeDataString(filter.Locations[0])}");
-        }
-
-        // Sort by most recent
-        parameters.Add("sortBy=DD");
+        // Note: sortBy=DD (sort by date) requires authentication and causes redirect to login
+        // Removed for now as it causes auth issues even with stored session
 
         return baseUrl + string.Join("&", parameters);
     }
