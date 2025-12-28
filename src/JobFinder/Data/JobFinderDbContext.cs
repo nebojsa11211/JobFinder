@@ -62,6 +62,8 @@ public class JobFinderDbContext : DbContext
             await AddColumnIfNotExistsAsync(connection, "Jobs", "Rating", "INTEGER NULL");
             await AddColumnIfNotExistsAsync(connection, "Jobs", "DiscardReason", "TEXT NULL");
             await AddColumnIfNotExistsAsync(connection, "Jobs", "CompanyId", "INTEGER NOT NULL DEFAULT 0");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "AiPromptSent", "TEXT NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "AiRawResponse", "TEXT NULL");
 
             // Create Companies table if it doesn't exist
             await CreateCompaniesTableIfNotExistsAsync(connection);

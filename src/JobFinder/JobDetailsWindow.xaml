@@ -185,6 +185,35 @@
                     </Border>
                 </StackPanel>
 
+                <!-- AI Debug Info (only visible when enabled in settings) -->
+                <StackPanel x:Name="AiDebugPanel" Margin="0,0,0,16"
+                            Visibility="{Binding ShowAiDebug, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <TextBlock Text="AI Debug Info" FontWeight="SemiBold" Margin="0,0,0,8"
+                               Foreground="#B8860B"/>
+
+                    <!-- Prompt Sent -->
+                    <Border Background="#FFF8E7" CornerRadius="6" Padding="12" Margin="0,0,0,8">
+                        <StackPanel>
+                            <TextBlock Text="Prompt Sent to AI:" FontWeight="Medium" Foreground="#8B6914" Margin="0,0,0,8"/>
+                            <TextBox Text="{Binding AiPromptSent, Mode=OneWay}" IsReadOnly="True"
+                                     TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                                     FontFamily="Consolas" FontSize="11"
+                                     Background="Transparent" BorderThickness="0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Raw Response -->
+                    <Border Background="#E7F8E7" CornerRadius="6" Padding="12">
+                        <StackPanel>
+                            <TextBlock Text="Raw AI Response:" FontWeight="Medium" Foreground="#147814" Margin="0,0,0,8"/>
+                            <TextBox Text="{Binding AiRawResponse, Mode=OneWay}" IsReadOnly="True"
+                                     TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                                     FontFamily="Consolas" FontSize="11"
+                                     Background="Transparent" BorderThickness="0"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
                 <!-- Additional Info -->
                 <Border Background="{StaticResource CardBrush}" CornerRadius="6" Padding="12" Margin="0,0,0,16">
                     <Grid>

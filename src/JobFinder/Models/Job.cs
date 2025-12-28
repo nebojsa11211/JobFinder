@@ -55,4 +55,14 @@ public class Job
     /// Reason provided by AI if job was auto-discarded.
     /// </summary>
     public string? DiscardReason { get; set; }
+
+    /// <summary>
+    /// The prompt that was sent to AI for analysis (for debugging).
+    /// </summary>
+    public string? AiPromptSent { get; set; }
+
+    /// <summary>
+    /// The raw response received from AI (for debugging).
+    /// </summary>
+    public string? AiRawResponse { get; set; }
 }

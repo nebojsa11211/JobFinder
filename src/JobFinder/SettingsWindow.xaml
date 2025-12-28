@@ -99,6 +99,15 @@
                                   ToolTip="When enabled, the browser window starts minimized instead of maximized"/>
                     </StackPanel>
                 </Border>
+
+                <!-- Debug Options -->
+                <Border Background="{StaticResource CardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock Text="Debug Options" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                        <CheckBox IsChecked="{Binding ShowAiDebug}" Content="Show AI debug info (prompt sent and response)"
+                                  ToolTip="When enabled, shows the exact prompt sent to AI and raw response in job details"/>
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </ScrollViewer>
 

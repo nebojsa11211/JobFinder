@@ -40,4 +40,9 @@ public class JobSummaryResult
     /// Raw AI response for debugging parse failures.
     /// </summary>
     public string? RawResponse { get; set; }
+
+    /// <summary>
+    /// The prompt that was sent to AI (for debugging).
+    /// </summary>
+    public string? PromptSent { get; set; }
 }

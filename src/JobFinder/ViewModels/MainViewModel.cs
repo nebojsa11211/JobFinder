@@ -68,10 +68,7 @@ public partial class MainViewModel : ObservableObject
     {
         await _jobRepository.InitializeDatabaseAsync();
         await LoadJobsAsync();
-        StatusMessage = $"Loaded {Jobs.Count} jobs from database. Starting LinkedIn...";
-
-        // Auto-start LinkedIn and search
-        await RefreshAsync();
+        StatusMessage = $"Loaded {Jobs.Count} jobs from database. Click Refresh to search LinkedIn.";
     }
 
     [RelayCommand]
@@ -304,14 +301,28 @@ public partial class MainViewModel : ObservableObject
 
         await _jobRepository.RestoreJobAsync(SelectedJob.Id);
         SelectedJob.IsDiscarded = false;
+        SelectedJob.SummaryCroatian = null;
+        SelectedJob.ShortSummary = null;
+        SelectedJob.Rating = null;
+        SelectedJob.DiscardReason = null;
         StatusMessage = $"Restored '{SelectedJob.Title}'.";
     }
 
     [RelayCommand]
     private async Task RestoreAllJobsAsync()
     {
+        // Remember the currently selected job ID so we can re-select after reload
+        var selectedJobId = SelectedJob?.Id;
+
         var count = await _jobRepository.RestoreAllJobsAsync();
         await LoadJobsAsync();
+
+        // Re-select the job from the new list (now with cleared summaries)
+        if (selectedJobId.HasValue)
+        {
+            SelectedJob = Jobs.FirstOrDefault(j => j.Id == selectedJobId.Value);
+        }
+
         StatusMessage = $"Restored {count} discarded jobs.";
     }
 
@@ -361,6 +372,8 @@ public partial class MainViewModel : ObservableObject
                             SelectedJob.ShortSummary = summary.ShortSummary;
                             SelectedJob.Rating = summary.Rating;
                             SelectedJob.DiscardReason = summary.DiscardReason;
+                            SelectedJob.AiPromptSent = summary.PromptSent;
+                            SelectedJob.AiRawResponse = summary.RawResponse;
 
                             // Update in database
                             if (job != null)
@@ -369,6 +382,8 @@ public partial class MainViewModel : ObservableObject
                                 job.ShortSummary = summary.ShortSummary;
                                 job.Rating = summary.Rating;
                                 job.DiscardReason = summary.DiscardReason;
+                                job.AiPromptSent = summary.PromptSent;
+                                job.AiRawResponse = summary.RawResponse;
                                 await _jobRepository.UpdateJobAsync(job);
                             }
 
@@ -490,6 +505,8 @@ public partial class MainViewModel : ObservableObject
                         job.ShortSummary = result.ShortSummary;
                         job.Rating = result.Rating;
                         job.DiscardReason = result.DiscardReason;
+                        job.AiPromptSent = result.PromptSent;
+                        job.AiRawResponse = result.RawResponse;
 
                         // Auto-discard enabled - discard jobs the AI recommends discarding
                         if (result.ShouldDiscard)
@@ -500,6 +517,19 @@ public partial class MainViewModel : ObservableObject
 
                         await _jobRepository.UpdateJobAsync(job);
                         analyzed++;
+
+                        // Update the corresponding JobViewModel in the UI collection
+                        var jobVm = Jobs.FirstOrDefault(j => j.Id == job.Id);
+                        if (jobVm != null)
+                        {
+                            jobVm.SummaryCroatian = result.Summary;
+                            jobVm.ShortSummary = result.ShortSummary;
+                            jobVm.Rating = result.Rating;
+                            jobVm.DiscardReason = job.DiscardReason;
+                            jobVm.AiPromptSent = result.PromptSent;
+                            jobVm.AiRawResponse = result.RawResponse;
+                            jobVm.IsDiscarded = job.IsDiscarded;
+                        }
 
                         var parseWarning = result.ParseFailed ? " ⚠️PARSE FAILED" : "";
                         var discardRecommendation = result.ShouldDiscard ? " [AI: discard]" : "";
@@ -629,6 +659,8 @@ public partial class MainViewModel : ObservableObject
                     job.ShortSummary = result.ShortSummary;
                     job.Rating = result.Rating;
                     job.DiscardReason = result.DiscardReason;
+                    job.AiPromptSent = result.PromptSent;
+                    job.AiRawResponse = result.RawResponse;
 
                     // Auto-discard enabled - discard jobs the AI recommends discarding
                     if (result.ShouldDiscard)
@@ -646,6 +678,8 @@ public partial class MainViewModel : ObservableObject
                         dbJob.Rating = result.Rating;
                         dbJob.DiscardReason = job.DiscardReason;
                         dbJob.IsDiscarded = job.IsDiscarded;
+                        dbJob.AiPromptSent = result.PromptSent;
+                        dbJob.AiRawResponse = result.RawResponse;
                         await _jobRepository.UpdateJobAsync(dbJob);
                     }
 

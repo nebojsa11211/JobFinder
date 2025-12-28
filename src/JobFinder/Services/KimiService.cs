@@ -38,12 +38,13 @@ public class KimiService : IKimiService
 
         try
         {
-            // System message strongly enforces JSON output format
+            // System message strongly enforces JSON output format and Croatian language
             var systemMessage = """
                 You are a job analysis assistant. You MUST respond with valid JSON only.
                 Never include any text before or after the JSON object.
                 Never use markdown code blocks. Just output raw JSON.
                 The JSON must have these exact fields: shortSummary, summary, rating, shouldDiscard, discardReason
+                CRITICAL: The shortSummary and summary fields MUST be written in Croatian language (hrvatski jezik).
                 """;
 
             var requestBody = new
@@ -89,7 +90,28 @@ public class KimiService : IKimiService
 
             var result = ParseStructuredResponse(message);
             if (result != null)
+            {
                 result.RawResponse = message;
+                result.PromptSent = prompt;
+
+                // Post-processing: validate AI's discard decision against job content
+                // If AI didn't discard but job lacks .NET/C# technologies, override the decision
+                if (!result.ShouldDiscard)
+                {
+                    var (shouldOverrideDiscard, overrideReason) = ValidateDotNetRequirement(jobDescription);
+                    if (shouldOverrideDiscard)
+                    {
+                        result.ShouldDiscard = true;
+                        result.DiscardReason = overrideReason;
+                    }
+                }
+
+                // Discarded jobs always get rating 0 - only .NET/C# jobs deserve a real rating
+                if (result.ShouldDiscard)
+                {
+                    result.Rating = 0;
+                }
+            }
 
             // Log the raw response for debugging
             await LogAiResponseAsync(jobDescription, message, result);
@@ -488,6 +510,78 @@ public class KimiService : IKimiService
         }
 
         return "AI analysis complete";
+    }
+
+    /// <summary>
+    /// Validates that job description requires .NET/C# technologies.
+    /// This is a hard check that overrides AI decisions.
+    /// </summary>
+    private static (bool ShouldDiscard, string? Reason) ValidateDotNetRequirement(string jobDescription)
+    {
+        var textLower = jobDescription.ToLowerInvariant();
+
+        // Check for .NET/C# technologies - these are REQUIRED for the job to be relevant
+        var dotNetPatterns = new[]
+        {
+            @"\.net\b",          // .NET, .NET Core, .NET 8, etc.
+            @"\bc#\b",           // C#
+            @"\bcsharp\b",       // csharp
+            @"\basp\.net\b",     // ASP.NET
+            @"\bblazor\b",       // Blazor
+            @"\bwpf\b",          // WPF
+            @"\bmaui\b",         // MAUI
+            @"\bwinforms\b",     // WinForms
+            @"\bxamarin\b",      // Xamarin
+            @"\bentity\s*framework\b",  // Entity Framework
+            @"\bef\s*core\b",    // EF Core
+            @"\bnuget\b",        // NuGet
+            @"\bazure\s+functions?\b",  // Azure Functions (usually .NET)
+            @"\bvisual\s+studio\b",     // Visual Studio (strong .NET indicator)
+        };
+
+        bool hasDotNet = false;
+        foreach (var pattern in dotNetPatterns)
+        {
+            if (Regex.IsMatch(textLower, pattern))
+            {
+                hasDotNet = true;
+                break;
+            }
+        }
+
+        if (hasDotNet)
+        {
+            return (false, null); // Job has .NET requirement, don't discard
+        }
+
+        // Check if it's primarily a different technology stack
+        var otherTechPatterns = new Dictionary<string, string>
+        {
+            { @"\b(python|django|flask|fastapi)\b", "Python-based role (no .NET)" },
+            { @"\b(java\b(?!script)|spring|kotlin|scala)\b", "Java/JVM-based role (no .NET)" },
+            { @"\b(ruby|rails|ruby\s+on\s+rails)\b", "Ruby-based role (no .NET)" },
+            { @"\b(php|laravel|symfony|wordpress)\b", "PHP-based role (no .NET)" },
+            { @"\b(golang|go\s+developer|go\s+engineer)\b", "Go-based role (no .NET)" },
+            { @"\b(rust\s+developer|rust\s+engineer|rustacean)\b", "Rust-based role (no .NET)" },
+            { @"\b(node\.?js|express\.?js|nest\.?js|deno)\b", "Node.js-based role (no .NET)" },
+            { @"\b(react|angular|vue)\.?(js)?\b.*\b(developer|engineer)\b", "Frontend-only role (no .NET)" },
+            { @"\b(devops|sre|site\s+reliability)\b(?!.*\.net)", "DevOps/SRE role (no .NET development)" },
+            { @"\b(terraform|kubernetes|k8s|docker)\b(?!.*\.net)", "Infrastructure role (no .NET development)" },
+            { @"\b(aws|gcp|google\s+cloud)\b(?!.*\.net)", "Non-Azure cloud role (no .NET)" },
+            { @"\b(data\s+engineer|machine\s+learning|ml\s+engineer)\b(?!.*\.net)", "Data/ML role (no .NET)" },
+        };
+
+        foreach (var (pattern, reason) in otherTechPatterns)
+        {
+            if (Regex.IsMatch(textLower, pattern))
+            {
+                return (true, reason);
+            }
+        }
+
+        // If no .NET AND no clear other tech, still might be irrelevant
+        // Be conservative - only discard if we're confident it's not .NET
+        return (false, null);
     }
 
     /// <summary>

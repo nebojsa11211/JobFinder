@@ -28,6 +28,9 @@ public partial class SettingsViewModel : ObservableObject
     private bool _startBrowserMinimized;
 
     [ObservableProperty]
+    private bool _showAiDebug;
+
+    [ObservableProperty]
     private string _statusMessage = "";
 
     public SettingsViewModel(ISettingsService settingsService)
@@ -45,6 +48,7 @@ public partial class SettingsViewModel : ObservableObject
         SummaryPrompt = settings.SummaryPrompt;
         ShowDiscardedJobs = settings.ShowDiscardedJobs;
         StartBrowserMinimized = settings.StartBrowserMinimized;
+        ShowAiDebug = settings.ShowAiDebug;
     }
 
     [RelayCommand]
@@ -57,6 +61,7 @@ public partial class SettingsViewModel : ObservableObject
         settings.SummaryPrompt = SummaryPrompt;
         settings.ShowDiscardedJobs = ShowDiscardedJobs;
         settings.StartBrowserMinimized = StartBrowserMinimized;
+        settings.ShowAiDebug = ShowAiDebug;
 
         await _settingsService.SaveAsync();
         StatusMessage = "Settings saved!";

@@ -131,19 +131,32 @@ public class JobRepository : IJobRepository
         if (job != null)
         {
             job.IsDiscarded = false;
+            job.SummaryCroatian = null;
+            job.ShortSummary = null;
+            job.Rating = null;
+            job.DiscardReason = null;
             await _context.SaveChangesAsync();
         }
     }
 
     public async Task<int> RestoreAllJobsAsync()
     {
-        var discardedJobs = await _context.Jobs.Where(j => j.IsDiscarded).ToListAsync();
-        foreach (var job in discardedJobs)
-        {
-            job.IsDiscarded = false;
-        }
-        await _context.SaveChangesAsync();
-        return discardedJobs.Count;
+        // Use ExecuteUpdateAsync to bypass change tracking issues
+        // This executes a direct SQL UPDATE on ALL jobs:
+        // - Restores discarded jobs
+        // - Clears summaries on ALL jobs so they can be re-analyzed
+        var count = await _context.Jobs
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(j => j.IsDiscarded, false)
+                .SetProperty(j => j.SummaryCroatian, (string?)null)
+                .SetProperty(j => j.ShortSummary, (string?)null)
+                .SetProperty(j => j.Rating, (int?)null)
+                .SetProperty(j => j.DiscardReason, (string?)null));
+
+        // Clear the change tracker to ensure LoadJobsAsync gets fresh data
+        _context.ChangeTracker.Clear();
+
+        return count;
     }
 
     public async Task<List<Job>> GetActiveJobsAsync()

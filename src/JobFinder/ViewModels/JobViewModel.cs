@@ -72,6 +72,14 @@ public partial class JobViewModel : ObservableObject
     [ObservableProperty]
     private string? _discardReason;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasAiDebugInfo))]
+    private string? _aiPromptSent;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasAiDebugInfo))]
+    private string? _aiRawResponse;
+
     public string DatePostedFormatted => DatePosted.ToString("MMM dd, yyyy");
     public string DateScrapedFormatted => DateScraped.ToString("MMM dd, HH:mm");
     public string StatusDisplay => Status.ToString();
@@ -106,8 +114,11 @@ public partial class JobViewModel : ObservableObject
         _isDiscarded = job.IsDiscarded;
         _rating = job.Rating;
         _discardReason = job.DiscardReason;
+        _aiPromptSent = job.AiPromptSent;
+        _aiRawResponse = job.AiRawResponse;
     }
 
     public bool HasSummaryCroatian => !string.IsNullOrEmpty(SummaryCroatian);
     public bool HasShortSummary => !string.IsNullOrEmpty(ShortSummary);
+    public bool HasAiDebugInfo => !string.IsNullOrEmpty(AiPromptSent) || !string.IsNullOrEmpty(AiRawResponse);
 }

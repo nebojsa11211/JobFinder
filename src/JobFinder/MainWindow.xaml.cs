@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using JobFinder.Services;
 using JobFinder.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -49,7 +50,8 @@ public partial class MainWindow : Window
 
     private void OpenJobDetailsWindow(MainViewModel mainViewModel)
     {
-        var detailsWindow = new JobDetailsWindow(mainViewModel.SelectedJob!, mainViewModel)
+        var settingsService = App.Services.GetRequiredService<ISettingsService>();
+        var detailsWindow = new JobDetailsWindow(mainViewModel.SelectedJob!, mainViewModel, settingsService)
         {
             Owner = this
         };
