@@ -191,6 +191,376 @@ public class KimiService : IKimiService
         }
     }
 
+    public async Task<ApplicationMessageResult?> GenerateApplicationMessageAsync(
+        string jobDescription,
+        string jobTitle,
+        string company,
+        string userProfile,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured || string.IsNullOrWhiteSpace(jobDescription) || string.IsNullOrWhiteSpace(userProfile))
+        {
+            return new ApplicationMessageResult
+            {
+                ParseFailed = true,
+                ErrorMessage = "Missing required data (API key, job description, or user profile)"
+            };
+        }
+
+        var settings = _settingsService.Settings;
+
+        // Build the prompt
+        var prompt = settings.ApplicationMessagePrompt
+            .Replace("{profile}", userProfile)
+            .Replace("{jobDescription}", jobDescription)
+            .Replace("{jobTitle}", jobTitle)
+            .Replace("{company}", company);
+
+        try
+        {
+            var systemMessage = """
+                You are a professional job application assistant. Generate personalized, genuine application messages.
+                You MUST respond with valid JSON only. Never include text before or after the JSON object.
+                The JSON must have: message, addressedRequirements (array), matchingSkills (array), confidenceScore (number 0-100).
+                Write the message in English, be professional but personable, avoid clichés.
+                """;
+
+            var requestBody = new
+            {
+                model = settings.KimiModel,
+                messages = new object[]
+                {
+                    new { role = "system", content = systemMessage },
+                    new { role = "user", content = prompt }
+                },
+                temperature = 0.7, // Slightly higher for more natural writing
+                response_format = new { type = "json_object" }
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Clear();
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", settings.KimiApiKey);
+
+            var response = await _httpClient.PostAsync(
+                $"{settings.KimiApiBaseUrl.TrimEnd('/')}/chat/completions",
+                content,
+                cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(cancellationToken);
+                return new ApplicationMessageResult
+                {
+                    ParseFailed = true,
+                    ErrorMessage = $"API error: {response.StatusCode} - {error}"
+                };
+            }
+
+            var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(responseJson);
+
+            var message = doc.RootElement
+                .GetProperty("choices")[0]
+                .GetProperty("message")
+                .GetProperty("content")
+                .GetString();
+
+            if (string.IsNullOrEmpty(message))
+            {
+                return new ApplicationMessageResult
+                {
+                    ParseFailed = true,
+                    ErrorMessage = "Empty response from AI"
+                };
+            }
+
+            var result = ParseApplicationMessageResponse(message);
+            result.PromptSent = prompt;
+            result.RawResponse = message;
+
+            // Log the response
+            await LogApplicationMessageAsync(jobTitle, company, message, result);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            return new ApplicationMessageResult
+            {
+                ParseFailed = true,
+                ErrorMessage = ex.Message,
+                RawResponse = ex.ToString()
+            };
+        }
+    }
+
+    public async Task<QuestionAnswersResult> GenerateQuestionAnswersAsync(
+        List<EasyApplyQuestion> questions,
+        string userProfile,
+        string jobDescription,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured || questions.Count == 0 || string.IsNullOrWhiteSpace(userProfile))
+        {
+            return new QuestionAnswersResult
+            {
+                ParseFailed = true,
+                ErrorMessage = "Missing required data"
+            };
+        }
+
+        var settings = _settingsService.Settings;
+
+        // Format questions for the prompt
+        var questionsText = string.Join("\n", questions.Select((q, i) =>
+            $"{i + 1}. {q.QuestionText}" + (q.Options.Count > 0 ? $" [Options: {string.Join(", ", q.Options)}]" : "")));
+
+        var prompt = AppSettings.DefaultQuestionAnswerPrompt
+            .Replace("{profile}", userProfile)
+            .Replace("{jobDescription}", jobDescription)
+            .Replace("{questions}", questionsText);
+
+        try
+        {
+            var systemMessage = """
+                You are helping a job candidate answer application questions accurately and professionally.
+                You MUST respond with valid JSON only. Never include text before or after the JSON object.
+                The JSON must have: answers (object mapping question text to answer string).
+                Be concise but complete. Use information from the profile when available.
+                For numeric questions (years of experience), extract the number from the profile.
+                For yes/no questions, answer definitively based on the profile.
+                """;
+
+            var requestBody = new
+            {
+                model = settings.KimiModel,
+                messages = new object[]
+                {
+                    new { role = "system", content = systemMessage },
+                    new { role = "user", content = prompt }
+                },
+                temperature = 0.3, // Lower for more accurate, consistent answers
+                response_format = new { type = "json_object" }
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            _httpClient.DefaultRequestHeaders.Clear();
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", settings.KimiApiKey);
+
+            var response = await _httpClient.PostAsync(
+                $"{settings.KimiApiBaseUrl.TrimEnd('/')}/chat/completions",
+                content,
+                cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(cancellationToken);
+                return new QuestionAnswersResult
+                {
+                    ParseFailed = true,
+                    ErrorMessage = $"API error: {response.StatusCode} - {error}"
+                };
+            }
+
+            var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(responseJson);
+
+            var message = doc.RootElement
+                .GetProperty("choices")[0]
+                .GetProperty("message")
+                .GetProperty("content")
+                .GetString();
+
+            if (string.IsNullOrEmpty(message))
+            {
+                return new QuestionAnswersResult
+                {
+                    ParseFailed = true,
+                    ErrorMessage = "Empty response from AI"
+                };
+            }
+
+            var result = ParseQuestionAnswersResponse(message, questions);
+            result.RawResponse = message;
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            return new QuestionAnswersResult
+            {
+                ParseFailed = true,
+                ErrorMessage = ex.Message,
+                RawResponse = ex.ToString()
+            };
+        }
+    }
+
+    private static ApplicationMessageResult ParseApplicationMessageResponse(string response)
+    {
+        var result = new ApplicationMessageResult();
+
+        try
+        {
+            var jsonString = ExtractJsonFromResponse(response);
+            if (string.IsNullOrEmpty(jsonString))
+            {
+                // Fallback: use the raw response as the message
+                result.Message = response.Trim();
+                result.ConfidenceScore = 50;
+                result.ParseFailed = true;
+                return result;
+            }
+
+            using var doc = JsonDocument.Parse(jsonString);
+            var root = doc.RootElement;
+
+            // Parse message
+            if (root.TryGetProperty("message", out var messageProp))
+                result.Message = messageProp.GetString() ?? "";
+            else if (root.TryGetProperty("Message", out messageProp))
+                result.Message = messageProp.GetString() ?? "";
+
+            // Parse addressed requirements
+            if (root.TryGetProperty("addressedRequirements", out var reqProp) && reqProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in reqProp.EnumerateArray())
+                {
+                    var val = item.GetString();
+                    if (!string.IsNullOrEmpty(val))
+                        result.AddressedRequirements.Add(val);
+                }
+            }
+
+            // Parse matching skills
+            if (root.TryGetProperty("matchingSkills", out var skillsProp) && skillsProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in skillsProp.EnumerateArray())
+                {
+                    var val = item.GetString();
+                    if (!string.IsNullOrEmpty(val))
+                        result.MatchingSkills.Add(val);
+                }
+            }
+
+            // Parse confidence score
+            if (root.TryGetProperty("confidenceScore", out var scoreProp))
+            {
+                if (scoreProp.ValueKind == JsonValueKind.Number)
+                    result.ConfidenceScore = scoreProp.GetInt32();
+                else if (scoreProp.ValueKind == JsonValueKind.String &&
+                         int.TryParse(scoreProp.GetString(), out var parsed))
+                    result.ConfidenceScore = parsed;
+            }
+
+            result.ConfidenceScore = Math.Clamp(result.ConfidenceScore, 0, 100);
+            result.ParseFailed = string.IsNullOrEmpty(result.Message);
+
+            return result;
+        }
+        catch
+        {
+            result.Message = response.Trim();
+            result.ConfidenceScore = 50;
+            result.ParseFailed = true;
+            return result;
+        }
+    }
+
+    private static QuestionAnswersResult ParseQuestionAnswersResponse(string response, List<EasyApplyQuestion> originalQuestions)
+    {
+        var result = new QuestionAnswersResult();
+
+        try
+        {
+            var jsonString = ExtractJsonFromResponse(response);
+            if (string.IsNullOrEmpty(jsonString))
+            {
+                result.ParseFailed = true;
+                result.ErrorMessage = "Could not extract JSON from response";
+                return result;
+            }
+
+            using var doc = JsonDocument.Parse(jsonString);
+            var root = doc.RootElement;
+
+            // Parse answers object
+            if (root.TryGetProperty("answers", out var answersProp) && answersProp.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in answersProp.EnumerateObject())
+                {
+                    var answer = prop.Value.GetString() ?? "";
+                    result.Answers[prop.Name] = answer;
+                }
+            }
+
+            // Try to match answers to original questions (AI might paraphrase question text)
+            foreach (var question in originalQuestions)
+            {
+                if (!result.Answers.ContainsKey(question.QuestionText))
+                {
+                    // Try partial match
+                    var matchedKey = result.Answers.Keys.FirstOrDefault(k =>
+                        k.Contains(question.QuestionText, StringComparison.OrdinalIgnoreCase) ||
+                        question.QuestionText.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+                    if (matchedKey != null)
+                    {
+                        result.Answers[question.QuestionText] = result.Answers[matchedKey];
+                    }
+                }
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.ParseFailed = true;
+            result.ErrorMessage = ex.Message;
+            return result;
+        }
+    }
+
+    private async Task LogApplicationMessageAsync(string jobTitle, string company, string response, ApplicationMessageResult result)
+    {
+        try
+        {
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            var status = result.ParseFailed ? "PARSE_FAILED" : "OK";
+            var logFile = Path.Combine(_logDirectory, $"application_{timestamp}_{status}.log");
+
+            var logContent = $"""
+                === APPLICATION MESSAGE LOG ===
+                Timestamp: {DateTime.Now:yyyy-MM-dd HH:mm:ss}
+                Job: {jobTitle} at {company}
+                Parse Status: {status}
+                Confidence: {result.ConfidenceScore}%
+
+                === MATCHING SKILLS ===
+                {string.Join(", ", result.MatchingSkills)}
+
+                === ADDRESSED REQUIREMENTS ===
+                {string.Join("\n", result.AddressedRequirements.Select(r => $"• {r}"))}
+
+                === GENERATED MESSAGE ===
+                {result.Message}
+
+                === RAW AI RESPONSE ===
+                {response}
+                """;
+
+            await File.WriteAllTextAsync(logFile, logContent);
+        }
+        catch
+        {
+            // Ignore logging errors
+        }
+    }
+
     private async Task LogAiResponseAsync(string jobDescription, string response, JobSummaryResult? result)
     {
         try

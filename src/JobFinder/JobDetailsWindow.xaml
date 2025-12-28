@@ -245,6 +245,28 @@
 
         <!-- Action Buttons -->
         <StackPanel Grid.Row="2" Margin="0,16,0,0">
+            <!-- AI Auto-Apply (Featured for Easy Apply jobs) -->
+            <Button x:Name="AutoApplyButton" Margin="0,0,0,8"
+                    Click="AutoApplyButton_Click"
+                    Visibility="{Binding HasEasyApply, Converter={StaticResource BoolToVisibilityConverter}}">
+                <Button.Style>
+                    <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                        <Setter Property="Background" Value="#4CAF50"/>
+                        <Setter Property="FontWeight" Value="Bold"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#388E3C"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                    <TextBlock Text="AI Auto-Apply" VerticalAlignment="Center"/>
+                    <TextBlock Text=" (Reviews before submitting)" FontWeight="Normal" FontSize="11"
+                               VerticalAlignment="Center" Opacity="0.9"/>
+                </StackPanel>
+            </Button>
+
             <Grid Margin="0,0,0,8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -254,7 +276,7 @@
                 <Button x:Name="GetDetailsButton" Grid.Column="0" Content="Get Full Details"
                         Style="{StaticResource SecondaryButton}" Margin="0,0,4,0"
                         Click="GetDetailsButton_Click"/>
-                <Button x:Name="ApplyButton" Grid.Column="1" Content="Apply to Job"
+                <Button x:Name="ApplyButton" Grid.Column="1" Content="Manual Apply"
                         Style="{StaticResource PrimaryButton}" Margin="4,0,0,0"
                         Click="ApplyButton_Click"/>
             </Grid>

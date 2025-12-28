@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Text.Json;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -14,6 +16,7 @@ public partial class MainViewModel : ObservableObject
     private readonly IKimiService _kimiService;
     private readonly ISettingsService _settingsService;
     private CancellationTokenSource? _searchCts;
+    private CancellationTokenSource? _autoApplyCts;
 
     [ObservableProperty]
     private ObservableCollection<JobViewModel> _jobs = [];
@@ -26,6 +29,12 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool _isSearching;
+
+    [ObservableProperty]
+    private bool _isAutoApplying;
+
+    [ObservableProperty]
+    private string _autoApplyProgress = "";
 
     [ObservableProperty]
     private bool _isLoggedIn;
@@ -239,6 +248,264 @@ public partial class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusMessage = $"Error: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Initiates the AI-powered automated Easy Apply flow with human-in-the-loop approval.
+    /// </summary>
+    [RelayCommand]
+    private async Task AutoApplyAsync()
+    {
+        if (SelectedJob == null)
+        {
+            StatusMessage = "Please select a job first.";
+            return;
+        }
+
+        if (!SelectedJob.HasEasyApply)
+        {
+            StatusMessage = "This job does not support Easy Apply.";
+            return;
+        }
+
+        if (!IsLoggedIn)
+        {
+            StatusMessage = "Please log in to LinkedIn first.";
+            return;
+        }
+
+        var userProfile = _settingsService.Settings.UserProfessionalProfile;
+        if (string.IsNullOrWhiteSpace(userProfile))
+        {
+            StatusMessage = "Please configure your Professional Profile in Settings first.";
+            return;
+        }
+
+        if (!_kimiService.IsConfigured)
+        {
+            StatusMessage = "Please configure Kimi API key in Settings first.";
+            return;
+        }
+
+        if (IsAutoApplying || IsSearching)
+        {
+            StatusMessage = "Another operation is in progress.";
+            return;
+        }
+
+        IsAutoApplying = true;
+        _autoApplyCts = new CancellationTokenSource();
+        ApplicationSession? session = null;
+
+        try
+        {
+            var jobUrl = SelectedJob.JobUrl ?? "";
+            var jobTitle = SelectedJob.Title;
+            var company = SelectedJob.CompanyName;
+            var description = SelectedJob.Description ?? "";
+
+            // Step 1: Get the job from database for full details
+            var job = await _jobRepository.GetJobByLinkedInIdAsync(SelectedJob.LinkedInJobId);
+            if (job == null)
+            {
+                StatusMessage = "Could not find job in database.";
+                return;
+            }
+
+            AutoApplyProgress = "Preparing application...";
+            StatusMessage = AutoApplyProgress;
+
+            // Step 2: Prepare the application (opens modal, detects questions)
+            var progress = new Progress<string>(msg =>
+            {
+                AutoApplyProgress = msg;
+                StatusMessage = msg;
+            });
+
+            session = await _linkedInService.PrepareApplicationAsync(job, progress, _autoApplyCts.Token);
+
+            if (session == null)
+            {
+                StatusMessage = "Could not prepare application. Modal may not have opened.";
+                await _linkedInService.CancelApplicationAsync();
+                return;
+            }
+
+            session.LogAction("Prepare", "Application modal opened and questions detected", true);
+
+            // Step 3: Generate AI message
+            AutoApplyProgress = "Generating personalized message...";
+            StatusMessage = AutoApplyProgress;
+
+            var messageResult = await _kimiService.GenerateApplicationMessageAsync(
+                description, jobTitle, company, userProfile, _autoApplyCts.Token);
+
+            if (messageResult != null)
+            {
+                session.ApplicationMessage = messageResult.Message;
+                session.MatchingSkills = messageResult.MatchingSkills;
+                session.AddressedRequirements = messageResult.AddressedRequirements;
+                session.ConfidenceScore = messageResult.ConfidenceScore;
+                session.LogAction("AI", "Generated application message", true,
+                    $"Confidence: {messageResult.ConfidenceScore}%");
+            }
+            else
+            {
+                session.ApplicationMessage = "";
+                session.ConfidenceScore = 0;
+                session.LogAction("AI", "Failed to generate message", false);
+            }
+
+            // Step 4: Generate answers for questions
+            var unansweredQuestions = session.Questions.Where(q => !q.IsPreFilled).ToList();
+            if (unansweredQuestions.Count > 0)
+            {
+                AutoApplyProgress = $"Generating answers for {unansweredQuestions.Count} questions...";
+                StatusMessage = AutoApplyProgress;
+
+                var answersResult = await _kimiService.GenerateQuestionAnswersAsync(
+                    unansweredQuestions, userProfile, description, _autoApplyCts.Token);
+
+                if (answersResult.Success)
+                {
+                    foreach (var question in unansweredQuestions)
+                    {
+                        if (answersResult.Answers.TryGetValue(question.QuestionText, out var answer))
+                        {
+                            question.Answer = answer;
+                        }
+                    }
+                    session.LogAction("AI", $"Generated answers for {answersResult.Answers.Count} questions", true);
+                }
+                else
+                {
+                    session.LogAction("AI", "Failed to generate question answers", false, answersResult.ErrorMessage);
+                }
+            }
+
+            // Step 5: Show review dialog - CRITICAL HUMAN-IN-THE-LOOP STEP
+            session.Status = ApplicationSessionStatus.ReadyForReview;
+            AutoApplyProgress = "Waiting for your approval...";
+            StatusMessage = "Review and approve the application before submitting.";
+
+            var reviewVm = new ApplicationReviewViewModel(session);
+            var reviewWindow = new ApplicationReviewWindow(reviewVm)
+            {
+                Owner = Application.Current.MainWindow
+            };
+
+            var approved = reviewWindow.ShowDialog() == true;
+
+            if (!approved)
+            {
+                session.Status = ApplicationSessionStatus.Cancelled;
+                session.CompletedAt = DateTime.Now;
+                session.LogAction("User", "Cancelled application", true);
+                await _linkedInService.CancelApplicationAsync();
+                await LogApplicationSessionAsync(session);
+                StatusMessage = "Application cancelled by user.";
+                return;
+            }
+
+            // Step 6: User approved - submit the application
+            session.Status = ApplicationSessionStatus.Submitting;
+            AutoApplyProgress = "Submitting application...";
+            StatusMessage = AutoApplyProgress;
+
+            var submitted = await _linkedInService.SubmitApplicationAsync(session, progress, _autoApplyCts.Token);
+
+            if (submitted)
+            {
+                session.Status = ApplicationSessionStatus.Submitted;
+                session.CompletedAt = DateTime.Now;
+                session.LogAction("Submit", "Application submitted successfully", true);
+
+                // Update job status in database
+                await _jobRepository.UpdateJobStatusAsync(SelectedJob.Id, ApplicationStatus.Applied);
+                SelectedJob.Status = ApplicationStatus.Applied;
+                SelectedJob.DateApplied = DateTime.Now;
+
+                await LogApplicationSessionAsync(session);
+                StatusMessage = $"Successfully applied to {jobTitle} at {company}!";
+            }
+            else
+            {
+                session.Status = ApplicationSessionStatus.Failed;
+                session.CompletedAt = DateTime.Now;
+                session.ErrorMessage = "Submission failed";
+                session.LogAction("Submit", "Application submission failed", false);
+                await LogApplicationSessionAsync(session);
+                StatusMessage = "Application submission failed. Please try manually.";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (session != null)
+            {
+                session.Status = ApplicationSessionStatus.Cancelled;
+                session.CompletedAt = DateTime.Now;
+                session.LogAction("System", "Operation cancelled", false);
+                await LogApplicationSessionAsync(session);
+            }
+            await _linkedInService.CancelApplicationAsync();
+            StatusMessage = "Auto-apply cancelled.";
+        }
+        catch (Exception ex)
+        {
+            if (session != null)
+            {
+                session.Status = ApplicationSessionStatus.Failed;
+                session.CompletedAt = DateTime.Now;
+                session.ErrorMessage = ex.Message;
+                session.LogAction("Error", ex.Message, false);
+                await LogApplicationSessionAsync(session);
+            }
+            await _linkedInService.CancelApplicationAsync();
+            StatusMessage = $"Auto-apply error: {ex.Message}";
+        }
+        finally
+        {
+            IsAutoApplying = false;
+            AutoApplyProgress = "";
+        }
+    }
+
+    [RelayCommand]
+    private void CancelAutoApply()
+    {
+        _autoApplyCts?.Cancel();
+        StatusMessage = "Cancelling auto-apply...";
+    }
+
+    /// <summary>
+    /// Logs an application session to a JSON file for audit and debugging.
+    /// </summary>
+    private async Task LogApplicationSessionAsync(ApplicationSession session)
+    {
+        try
+        {
+            var logsDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "JobFinder", "application-logs");
+
+            Directory.CreateDirectory(logsDir);
+
+            var filename = $"{session.SessionId}_{session.Status}_{DateTime.Now:yyyyMMdd_HHmmss}.json";
+            var filePath = Path.Combine(logsDir, filename);
+
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            };
+
+            var json = JsonSerializer.Serialize(session, options);
+            await File.WriteAllTextAsync(filePath, json);
+        }
+        catch
+        {
+            // Logging should not fail the main operation
         }
     }
 

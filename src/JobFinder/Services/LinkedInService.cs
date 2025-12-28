@@ -15,6 +15,7 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
     private IPage? _page;
     private bool _isLoggedIn;
     private readonly string _userDataDir;
+    private readonly Random _random = new();
 
     public bool IsLoggedIn => _isLoggedIn;
     public bool IsBrowserOpen => _browser != null;
@@ -672,6 +673,773 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
             return false;
         }
     }
+
+    #region Auto-Apply Implementation
+
+    public async Task<ApplicationSession?> PrepareApplicationAsync(
+        Job job,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_page == null || !_isLoggedIn)
+        {
+            progress?.Report("Browser not ready or not logged in");
+            return null;
+        }
+
+        var session = new ApplicationSession
+        {
+            JobId = job.Id,
+            LinkedInJobId = job.LinkedInJobId,
+            JobTitle = job.Title,
+            Company = job.Company?.Name ?? job.ScrapedCompanyName ?? "Unknown",
+            JobUrl = job.JobUrl ?? ""
+        };
+
+        try
+        {
+            // Step 1: Navigate to job page with human-like delay
+            progress?.Report("Opening job page...");
+            session.LogAction("Navigate", $"Opening {job.JobUrl}");
+
+            await HumanDelayAsync();
+            await _page.GotoAsync(job.JobUrl!, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            await HumanDelayAsync();
+
+            // Step 2: Find and click Easy Apply button
+            progress?.Report("Looking for Easy Apply button...");
+            var easyApplyButton = await FindEasyApplyButtonAsync();
+
+            if (easyApplyButton == null)
+            {
+                session.Status = ApplicationSessionStatus.Failed;
+                session.ErrorMessage = "Easy Apply button not found";
+                session.LogAction("FindButton", "Easy Apply button not found", false);
+                return session;
+            }
+
+            session.LogAction("FindButton", "Found Easy Apply button");
+
+            // Step 3: Click Easy Apply button
+            progress?.Report("Opening Easy Apply form...");
+            await HumanDelayAsync(500, 1500);
+            await easyApplyButton.ClickAsync();
+            await HumanDelayAsync(1000, 2000);
+
+            // Step 4: Wait for modal to appear
+            try
+            {
+                await _page.WaitForSelectorAsync(
+                    ".jobs-easy-apply-modal, .jobs-easy-apply-content, [data-test-modal-id='easy-apply-modal']",
+                    new PageWaitForSelectorOptions { Timeout = 5000 });
+                session.LogAction("ModalOpen", "Easy Apply modal opened");
+            }
+            catch (TimeoutException)
+            {
+                session.Status = ApplicationSessionStatus.Failed;
+                session.ErrorMessage = "Easy Apply modal did not appear";
+                session.LogAction("ModalOpen", "Modal timeout", false);
+                return session;
+            }
+
+            // Step 5: Detect all form fields and questions across all pages
+            progress?.Report("Analyzing application form...");
+            var (questions, totalPages) = await DetectAllQuestionsAsync(progress, cancellationToken);
+
+            session.Questions = questions;
+            session.TotalPages = totalPages;
+            session.LogAction("FormAnalyzed", $"Detected {questions.Count} questions across {totalPages} pages");
+
+            // Step 6: Navigate back to first page for filling
+            await NavigateToFirstPageAsync();
+
+            session.Status = ApplicationSessionStatus.ReadyForReview;
+            progress?.Report($"Form ready: {questions.Count} questions detected");
+
+            return session;
+        }
+        catch (Exception ex)
+        {
+            session.Status = ApplicationSessionStatus.Failed;
+            session.ErrorMessage = ex.Message;
+            session.LogAction("Error", ex.Message, false);
+            return session;
+        }
+    }
+
+    public async Task<bool> SubmitApplicationAsync(
+        ApplicationSession session,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_page == null || !_isLoggedIn)
+        {
+            session.ErrorMessage = "Browser not ready";
+            return false;
+        }
+
+        try
+        {
+            session.Status = ApplicationSessionStatus.Submitting;
+            var currentPage = 0;
+            var questionsOnCurrentPage = session.Questions.Where(q => q.PageIndex == currentPage).ToList();
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Fill all questions on current page
+                foreach (var question in questionsOnCurrentPage)
+                {
+                    if (question.IsPreFilled && !string.IsNullOrEmpty(question.PreFilledValue))
+                    {
+                        session.LogAction("Skip", $"Pre-filled: {question.QuestionText}");
+                        continue;
+                    }
+
+                    progress?.Report($"Filling: {Truncate(question.QuestionText, 40)}...");
+                    await HumanDelayAsync(500, 1200);
+
+                    var success = await FillQuestionAsync(question);
+                    session.LogAction("Fill", question.QuestionText, success, question.Answer);
+                }
+
+                // Look for Next/Review/Submit button
+                var (buttonType, button) = await FindNavigationButtonAsync();
+
+                if (buttonType == "submit")
+                {
+                    // Final submission
+                    progress?.Report("Submitting application...");
+                    await HumanDelayAsync(1000, 2000);
+                    await button!.ClickAsync();
+
+                    session.LogAction("Submit", "Clicked submit button");
+
+                    // Wait for confirmation
+                    await Task.Delay(2500, cancellationToken);
+
+                    // Check for success modal
+                    var successIndicator = await _page.QuerySelectorAsync(
+                        ".artdeco-modal:has-text('Application sent'), " +
+                        ".artdeco-modal:has-text('application submitted'), " +
+                        "[data-test-modal-id='post-apply-modal'], " +
+                        ".jobs-post-apply-modal");
+
+                    if (successIndicator != null)
+                    {
+                        session.Status = ApplicationSessionStatus.Submitted;
+                        session.CompletedAt = DateTime.Now;
+                        session.LogAction("Success", "Application submitted successfully");
+
+                        // Try to dismiss success modal
+                        await DismissModalAsync();
+
+                        return true;
+                    }
+
+                    // Check for errors
+                    var errorIndicator = await _page.QuerySelectorAsync(
+                        ".artdeco-inline-feedback--error, .fb-form-element--error");
+
+                    if (errorIndicator != null)
+                    {
+                        var errorText = await errorIndicator.InnerTextAsync();
+                        session.Status = ApplicationSessionStatus.Failed;
+                        session.ErrorMessage = $"Form validation error: {errorText}";
+                        session.LogAction("Error", errorText, false);
+                        return false;
+                    }
+
+                    // Unknown state - assume failure
+                    session.Status = ApplicationSessionStatus.Failed;
+                    session.ErrorMessage = "Submission confirmation not detected";
+                    return false;
+                }
+                else if (buttonType == "next" || buttonType == "review")
+                {
+                    // Move to next page
+                    progress?.Report($"Moving to page {currentPage + 2}...");
+                    await HumanDelayAsync(500, 1000);
+                    await button!.ClickAsync();
+                    await HumanDelayAsync(800, 1500);
+
+                    currentPage++;
+                    questionsOnCurrentPage = session.Questions.Where(q => q.PageIndex == currentPage).ToList();
+                    session.CurrentPage = currentPage;
+                    session.LogAction("NextPage", $"Navigated to page {currentPage + 1}");
+                }
+                else
+                {
+                    // No button found - something went wrong
+                    session.Status = ApplicationSessionStatus.Failed;
+                    session.ErrorMessage = "Could not find navigation button";
+                    return false;
+                }
+            }
+
+            session.Status = ApplicationSessionStatus.Cancelled;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            session.Status = ApplicationSessionStatus.Failed;
+            session.ErrorMessage = ex.Message;
+            session.LogAction("Error", ex.Message, false);
+            return false;
+        }
+    }
+
+    public async Task CancelApplicationAsync()
+    {
+        if (_page == null) return;
+
+        try
+        {
+            // Try to find and click dismiss/close button
+            var dismissButton = await _page.QuerySelectorAsync(
+                "button[aria-label='Dismiss'], " +
+                "button[data-test-modal-close-btn], " +
+                ".artdeco-modal__dismiss, " +
+                ".mercado-match button:has-text('Discard')");
+
+            if (dismissButton != null)
+            {
+                await dismissButton.ClickAsync();
+                await Task.Delay(500);
+
+                // Handle "Discard application?" confirmation dialog
+                var discardConfirm = await _page.QuerySelectorAsync(
+                    "button[data-test-dialog-primary-btn], " +
+                    "button:has-text('Discard')");
+
+                if (discardConfirm != null)
+                {
+                    await discardConfirm.ClickAsync();
+                    await Task.Delay(500);
+                }
+            }
+        }
+        catch
+        {
+            // Ignore errors when cancelling
+        }
+    }
+
+    #endregion
+
+    #region Auto-Apply Helpers
+
+    private async Task HumanDelayAsync(int? minMs = null, int? maxMs = null)
+    {
+        var settings = _settingsService.Settings;
+        var min = minMs ?? settings.MinActionDelayMs;
+        var max = maxMs ?? settings.MaxActionDelayMs;
+
+        var delay = _random.Next(min, max);
+
+        // Occasionally add extra "thinking" time (15% chance)
+        if (_random.Next(100) < 15)
+        {
+            delay += _random.Next(500, 1500);
+        }
+
+        await Task.Delay(delay);
+    }
+
+    private async Task HumanTypeAsync(IElementHandle element, string text)
+    {
+        // Clear existing content first
+        await element.FillAsync("");
+        await Task.Delay(_random.Next(100, 300));
+
+        // Type character by character with human-like delays
+        foreach (var c in text)
+        {
+            await element.TypeAsync(c.ToString());
+            await Task.Delay(_random.Next(30, 100)); // 30-100ms between keystrokes
+        }
+    }
+
+    private async Task<IElementHandle?> FindEasyApplyButtonAsync()
+    {
+        var selectors = new[]
+        {
+            "button.jobs-apply-button--top-card",
+            ".jobs-apply-button",
+            "button:has-text('Easy Apply')",
+            "[data-job-apply-button]",
+            ".jobs-s-apply button"
+        };
+
+        foreach (var selector in selectors)
+        {
+            var button = await _page!.QuerySelectorAsync(selector);
+            if (button != null)
+            {
+                var text = await button.InnerTextAsync();
+                if (text.Contains("Easy Apply", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("Apply", StringComparison.OrdinalIgnoreCase))
+                {
+                    return button;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<(List<EasyApplyQuestion> Questions, int TotalPages)> DetectAllQuestionsAsync(
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var allQuestions = new List<EasyApplyQuestion>();
+        var pageIndex = 0;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            progress?.Report($"Analyzing page {pageIndex + 1}...");
+
+            // Detect questions on current page
+            var pageQuestions = await DetectPageQuestionsAsync(pageIndex);
+            allQuestions.AddRange(pageQuestions);
+
+            // Look for Next button to see if there are more pages
+            var (buttonType, button) = await FindNavigationButtonAsync();
+
+            if (buttonType == "submit")
+            {
+                // We're on the final page
+                break;
+            }
+            else if (buttonType == "next" || buttonType == "review")
+            {
+                // Navigate to next page to detect more questions
+                await HumanDelayAsync(300, 600);
+                await button!.ClickAsync();
+                await HumanDelayAsync(600, 1000);
+                pageIndex++;
+            }
+            else
+            {
+                // No button found - assume we're done
+                break;
+            }
+
+            // Safety limit
+            if (pageIndex > 10) break;
+        }
+
+        return (allQuestions, pageIndex + 1);
+    }
+
+    private async Task<List<EasyApplyQuestion>> DetectPageQuestionsAsync(int pageIndex)
+    {
+        var questions = new List<EasyApplyQuestion>();
+
+        if (_page == null) return questions;
+
+        // Find all form groups/fields in the modal
+        var formGroups = await _page.QuerySelectorAllAsync(
+            ".jobs-easy-apply-modal .fb-form-element, " +
+            ".jobs-easy-apply-modal .jobs-easy-apply-form-section__grouping, " +
+            ".jobs-easy-apply-content .fb-form-element");
+
+        foreach (var group in formGroups)
+        {
+            try
+            {
+                var question = await ExtractQuestionFromElementAsync(group, pageIndex);
+                if (question != null)
+                {
+                    questions.Add(question);
+                }
+            }
+            catch
+            {
+                // Skip problematic form elements
+            }
+        }
+
+        return questions;
+    }
+
+    private async Task<EasyApplyQuestion?> ExtractQuestionFromElementAsync(IElementHandle element, int pageIndex)
+    {
+        // Get label text
+        var labelEl = await element.QuerySelectorAsync("label, .fb-form-element-label, .t-14");
+        var labelText = labelEl != null ? await labelEl.InnerTextAsync() : "";
+        labelText = labelText.Trim();
+
+        if (string.IsNullOrEmpty(labelText) || labelText.Length < 3)
+            return null;
+
+        var question = new EasyApplyQuestion
+        {
+            QuestionText = labelText,
+            PageIndex = pageIndex,
+            Label = labelText
+        };
+
+        // Detect input type
+        var textInput = await element.QuerySelectorAsync("input[type='text'], input[type='tel'], input[type='email'], input[type='number']");
+        var textArea = await element.QuerySelectorAsync("textarea");
+        var select = await element.QuerySelectorAsync("select");
+        var radioButtons = await element.QuerySelectorAllAsync("input[type='radio']");
+        var checkboxes = await element.QuerySelectorAllAsync("input[type='checkbox']");
+        var fileInput = await element.QuerySelectorAsync("input[type='file']");
+
+        if (textInput != null)
+        {
+            var inputType = await textInput.GetAttributeAsync("type") ?? "text";
+            question.Type = inputType switch
+            {
+                "tel" => QuestionType.Phone,
+                "email" => QuestionType.Email,
+                "number" => QuestionType.Number,
+                _ => QuestionType.Text
+            };
+
+            // Check if pre-filled
+            var value = await textInput.GetAttributeAsync("value") ?? "";
+            if (!string.IsNullOrEmpty(value))
+            {
+                question.IsPreFilled = true;
+                question.PreFilledValue = value;
+            }
+
+            // Check for required
+            var required = await textInput.GetAttributeAsync("required");
+            var ariaRequired = await textInput.GetAttributeAsync("aria-required");
+            question.IsRequired = required != null || ariaRequired == "true";
+
+            // Build selector for this input
+            var inputId = await textInput.GetAttributeAsync("id");
+            question.Selector = !string.IsNullOrEmpty(inputId) ? $"#{inputId}" : "input[type='text']";
+        }
+        else if (textArea != null)
+        {
+            question.Type = QuestionType.TextArea;
+            var value = await textArea.InnerTextAsync();
+            if (!string.IsNullOrEmpty(value?.Trim()))
+            {
+                question.IsPreFilled = true;
+                question.PreFilledValue = value;
+            }
+
+            var textAreaId = await textArea.GetAttributeAsync("id");
+            question.Selector = !string.IsNullOrEmpty(textAreaId) ? $"#{textAreaId}" : "textarea";
+        }
+        else if (select != null)
+        {
+            question.Type = QuestionType.Select;
+
+            // Get options
+            var options = await select.QuerySelectorAllAsync("option");
+            foreach (var option in options)
+            {
+                var optionText = await option.InnerTextAsync();
+                if (!string.IsNullOrWhiteSpace(optionText) && optionText != "Select an option")
+                {
+                    question.Options.Add(optionText.Trim());
+                }
+            }
+
+            var selectId = await select.GetAttributeAsync("id");
+            question.Selector = !string.IsNullOrEmpty(selectId) ? $"#{selectId}" : "select";
+        }
+        else if (radioButtons.Count > 0)
+        {
+            question.Type = QuestionType.Radio;
+
+            // Detect Yes/No pattern
+            var optionTexts = new List<string>();
+            foreach (var radio in radioButtons)
+            {
+                var radioLabel = await radio.EvaluateAsync<string>("el => el.parentElement?.textContent || el.nextSibling?.textContent || ''");
+                if (!string.IsNullOrWhiteSpace(radioLabel))
+                {
+                    optionTexts.Add(radioLabel.Trim());
+                }
+            }
+            question.Options = optionTexts;
+
+            if (optionTexts.Any(o => o.Contains("Yes", StringComparison.OrdinalIgnoreCase)) &&
+                optionTexts.Any(o => o.Contains("No", StringComparison.OrdinalIgnoreCase)))
+            {
+                question.Type = QuestionType.YesNo;
+            }
+
+            var firstName = await radioButtons.First().GetAttributeAsync("name");
+            question.Selector = !string.IsNullOrEmpty(firstName) ? $"input[name='{firstName}']" : "input[type='radio']";
+        }
+        else if (checkboxes.Count > 0)
+        {
+            question.Type = QuestionType.Checkbox;
+
+            foreach (var checkbox in checkboxes)
+            {
+                var checkLabel = await checkbox.EvaluateAsync<string>("el => el.parentElement?.textContent || ''");
+                if (!string.IsNullOrWhiteSpace(checkLabel))
+                {
+                    question.Options.Add(checkLabel.Trim());
+                }
+            }
+        }
+        else if (fileInput != null)
+        {
+            question.Type = QuestionType.FileUpload;
+
+            // Check if resume is already uploaded
+            var uploadedFile = await element.QuerySelectorAsync(".jobs-document-upload__file-name, .artdeco-button--tertiary");
+            if (uploadedFile != null)
+            {
+                question.IsPreFilled = true;
+                question.PreFilledValue = await uploadedFile.InnerTextAsync();
+            }
+        }
+        else
+        {
+            question.Type = QuestionType.Unknown;
+        }
+
+        return question;
+    }
+
+    private async Task<bool> FillQuestionAsync(EasyApplyQuestion question)
+    {
+        if (_page == null || string.IsNullOrEmpty(question.Answer))
+            return false;
+
+        try
+        {
+            switch (question.Type)
+            {
+                case QuestionType.Text:
+                case QuestionType.Phone:
+                case QuestionType.Email:
+                case QuestionType.Number:
+                    var textInput = await FindInputByLabelAsync(question.QuestionText, "input");
+                    if (textInput != null)
+                    {
+                        await textInput.FillAsync("");
+                        await HumanDelayAsync(100, 300);
+                        await HumanTypeAsync(textInput, question.Answer);
+                        return true;
+                    }
+                    break;
+
+                case QuestionType.TextArea:
+                    var textArea = await FindInputByLabelAsync(question.QuestionText, "textarea");
+                    if (textArea != null)
+                    {
+                        await textArea.FillAsync("");
+                        await HumanDelayAsync(100, 300);
+                        await HumanTypeAsync(textArea, question.Answer);
+                        return true;
+                    }
+                    break;
+
+                case QuestionType.Select:
+                    var select = await FindInputByLabelAsync(question.QuestionText, "select");
+                    if (select != null)
+                    {
+                        await select.SelectOptionAsync(new SelectOptionValue { Label = question.Answer });
+                        return true;
+                    }
+                    break;
+
+                case QuestionType.Radio:
+                case QuestionType.YesNo:
+                    // Find radio button with matching value/label
+                    var radioSelector = $"input[type='radio']";
+                    var radios = await _page.QuerySelectorAllAsync(radioSelector);
+                    foreach (var radio in radios)
+                    {
+                        var radioText = await radio.EvaluateAsync<string>("el => el.parentElement?.textContent || el.labels?.[0]?.textContent || ''");
+                        if (radioText.Contains(question.Answer, StringComparison.OrdinalIgnoreCase))
+                        {
+                            await radio.ClickAsync();
+                            return true;
+                        }
+                    }
+                    break;
+
+                case QuestionType.Checkbox:
+                    // For single checkbox, check it if answer indicates yes
+                    var checkbox = await FindInputByLabelAsync(question.QuestionText, "input[type='checkbox']");
+                    if (checkbox != null)
+                    {
+                        var shouldCheck = question.Answer.Contains("yes", StringComparison.OrdinalIgnoreCase) ||
+                                         question.Answer.Contains("true", StringComparison.OrdinalIgnoreCase);
+                        var isChecked = await checkbox.IsCheckedAsync();
+
+                        if (shouldCheck && !isChecked)
+                        {
+                            await checkbox.ClickAsync();
+                        }
+                        return true;
+                    }
+                    break;
+
+                case QuestionType.FileUpload:
+                    // Skip file uploads - user should have resume pre-uploaded
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private async Task<IElementHandle?> FindInputByLabelAsync(string labelText, string inputSelector)
+    {
+        if (_page == null) return null;
+
+        // Strategy 1: Find by label's for attribute
+        var labels = await _page.QuerySelectorAllAsync("label");
+        foreach (var label in labels)
+        {
+            var text = await label.InnerTextAsync();
+            if (text.Contains(labelText, StringComparison.OrdinalIgnoreCase))
+            {
+                var forAttr = await label.GetAttributeAsync("for");
+                if (!string.IsNullOrEmpty(forAttr))
+                {
+                    var input = await _page.QuerySelectorAsync($"#{forAttr}");
+                    if (input != null) return input;
+                }
+
+                // Strategy 2: Input is inside or next to label
+                var inputInLabel = await label.QuerySelectorAsync(inputSelector);
+                if (inputInLabel != null) return inputInLabel;
+            }
+        }
+
+        // Strategy 3: Find by aria-label
+        var inputWithAria = await _page.QuerySelectorAsync($"{inputSelector}[aria-label*='{labelText}']");
+        if (inputWithAria != null) return inputWithAria;
+
+        // Strategy 4: Find by placeholder
+        var inputWithPlaceholder = await _page.QuerySelectorAsync($"{inputSelector}[placeholder*='{labelText}']");
+        if (inputWithPlaceholder != null) return inputWithPlaceholder;
+
+        return null;
+    }
+
+    private async Task<(string Type, IElementHandle? Button)> FindNavigationButtonAsync()
+    {
+        if (_page == null) return ("none", null);
+
+        // Check for Submit button first
+        var submitSelectors = new[]
+        {
+            "button[aria-label='Submit application']",
+            "button:has-text('Submit application')",
+            "button[data-easy-apply-next-button]:has-text('Submit')"
+        };
+
+        foreach (var selector in submitSelectors)
+        {
+            var btn = await _page.QuerySelectorAsync(selector);
+            if (btn != null && await btn.IsVisibleAsync())
+            {
+                return ("submit", btn);
+            }
+        }
+
+        // Check for Review button
+        var reviewSelectors = new[]
+        {
+            "button:has-text('Review')",
+            "button[aria-label='Review your application']"
+        };
+
+        foreach (var selector in reviewSelectors)
+        {
+            var btn = await _page.QuerySelectorAsync(selector);
+            if (btn != null && await btn.IsVisibleAsync())
+            {
+                return ("review", btn);
+            }
+        }
+
+        // Check for Next button
+        var nextSelectors = new[]
+        {
+            "button[aria-label='Continue to next step']",
+            "button:has-text('Next')",
+            "button[data-easy-apply-next-button]"
+        };
+
+        foreach (var selector in nextSelectors)
+        {
+            var btn = await _page.QuerySelectorAsync(selector);
+            if (btn != null && await btn.IsVisibleAsync())
+            {
+                return ("next", btn);
+            }
+        }
+
+        return ("none", null);
+    }
+
+    private async Task NavigateToFirstPageAsync()
+    {
+        if (_page == null) return;
+
+        // Try to find and click Back button until we're at the first page
+        for (int i = 0; i < 10; i++)
+        {
+            var backButton = await _page.QuerySelectorAsync(
+                "button[aria-label='Back'], " +
+                "button:has-text('Back')");
+
+            if (backButton == null || !await backButton.IsVisibleAsync())
+            {
+                break;
+            }
+
+            await backButton.ClickAsync();
+            await Task.Delay(500);
+        }
+    }
+
+    private async Task DismissModalAsync()
+    {
+        if (_page == null) return;
+
+        try
+        {
+            // Try multiple dismiss patterns
+            var dismissButton = await _page.QuerySelectorAsync(
+                "button[aria-label='Dismiss'], " +
+                ".artdeco-modal__dismiss, " +
+                ".artdeco-button--circle");
+
+            if (dismissButton != null)
+            {
+                await dismissButton.ClickAsync();
+            }
+        }
+        catch
+        {
+            // Ignore dismiss errors
+        }
+    }
+
+    private static string Truncate(string text, int maxLength)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
+            return text;
+        return text[..(maxLength - 3)] + "...";
+    }
+
+    #endregion
 
     private string BuildSearchUrl(SearchFilter filter)
     {

@@ -134,6 +134,14 @@ public partial class JobDetailsWindow : Window
         }
     }
 
+    private async void AutoApplyButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mainViewModel.AutoApplyCommand.CanExecute(null))
+        {
+            await _mainViewModel.AutoApplyCommand.ExecuteAsync(null);
+        }
+    }
+
     private void OpenInBrowserButton_Click(object sender, RoutedEventArgs e)
     {
         if (_mainViewModel.OpenJobInBrowserCommand.CanExecute(null))
