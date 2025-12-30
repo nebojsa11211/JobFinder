@@ -73,13 +73,20 @@ public partial class App : Application
 
     protected override async void OnExit(ExitEventArgs e)
     {
-        var linkedInService = _serviceProvider.GetService<ILinkedInService>();
-        if (linkedInService != null)
+        try
         {
-            await linkedInService.CloseAsync();
+            var linkedInService = _serviceProvider.GetService<ILinkedInService>();
+            if (linkedInService != null)
+            {
+                await linkedInService.CloseAsync();
+            }
+            _serviceProvider.Dispose();
+            base.OnExit(e);
         }
+        catch (Exception ex)
+        {
 
-        _serviceProvider.Dispose();
-        base.OnExit(e);
+            throw;
+        }
     }
 }
