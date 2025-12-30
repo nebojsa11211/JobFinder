@@ -17,6 +17,7 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
     private readonly string _userDataDir;
     private readonly Random _random = new();
 
+    public JobPlatform Platform => JobPlatform.LinkedIn;
     public bool IsLoggedIn => _isLoggedIn;
     public bool IsBrowserOpen => _browser != null;
 
@@ -320,7 +321,8 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
                         var job = new Job
                         {
-                            LinkedInJobId = jobId,
+                            Platform = JobPlatform.LinkedIn,
+                            ExternalJobId = jobId,
                             Title = title,
                             ScrapedCompanyName = company,
                             Location = location,
@@ -493,7 +495,8 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
 
         return new Job
         {
-            LinkedInJobId = jobId,
+            Platform = JobPlatform.LinkedIn,
+            ExternalJobId = jobId,
             Title = title.Trim(),
             ScrapedCompanyName = company.Trim(),
             Location = location.Trim(),
@@ -690,7 +693,8 @@ public partial class LinkedInService : ILinkedInService, IAsyncDisposable
         var session = new ApplicationSession
         {
             JobId = job.Id,
-            LinkedInJobId = job.LinkedInJobId,
+            Platform = JobPlatform.LinkedIn,
+            ExternalJobId = job.ExternalJobId,
             JobTitle = job.Title,
             Company = job.Company?.Name ?? job.ScrapedCompanyName ?? "Unknown",
             JobUrl = job.JobUrl ?? ""

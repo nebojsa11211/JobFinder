@@ -25,12 +25,25 @@ public partial class App : Application
         // Database
         services.AddDbContext<JobFinderDbContext>();
 
-        // Services
-        services.AddSingleton<ILinkedInService, LinkedInService>();
+        // Core Services
         services.AddSingleton<ISettingsService, SettingsService>();
         services.AddSingleton<IKimiService, KimiService>();
         services.AddScoped<IJobRepository, JobRepository>();
         services.AddScoped<ICompanyRepository, CompanyRepository>();
+
+        // Platform Services - register as singletons
+        // LinkedIn service (registered as both ILinkedInService and IJobPlatformService)
+        services.AddSingleton<LinkedInService>();
+        services.AddSingleton<ILinkedInService>(sp => sp.GetRequiredService<LinkedInService>());
+        services.AddSingleton<IJobPlatformService>(sp => sp.GetRequiredService<LinkedInService>());
+
+        // Upwork service (registered as both IUpworkService and IJobPlatformService)
+        services.AddSingleton<UpworkService>();
+        services.AddSingleton<IUpworkService>(sp => sp.GetRequiredService<UpworkService>());
+        services.AddSingleton<IJobPlatformService>(sp => sp.GetRequiredService<UpworkService>());
+
+        // Platform Service Factory - resolves platform-specific services
+        services.AddSingleton<IJobPlatformServiceFactory, JobPlatformServiceFactory>();
 
         // ViewModels
         services.AddTransient<MainViewModel>();
@@ -75,17 +88,20 @@ public partial class App : Application
     {
         try
         {
-            var linkedInService = _serviceProvider.GetService<ILinkedInService>();
-            if (linkedInService != null)
+            // Close all platform services
+            var platformFactory = _serviceProvider.GetService<IJobPlatformServiceFactory>();
+            if (platformFactory != null)
             {
-                await linkedInService.CloseAsync();
+                foreach (var service in platformFactory.GetAllServices())
+                {
+                    await service.CloseAsync();
+                }
             }
             _serviceProvider.Dispose();
             base.OnExit(e);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-
             throw;
         }
     }

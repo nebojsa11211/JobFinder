@@ -6,7 +6,8 @@ namespace JobFinder.ViewModels;
 public partial class JobViewModel : ObservableObject
 {
     public int Id { get; }
-    public string LinkedInJobId { get; }
+    public JobPlatform Platform { get; }
+    public string ExternalJobId { get; }
 
     [ObservableProperty]
     private string _title;
@@ -80,9 +81,38 @@ public partial class JobViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(HasAiDebugInfo))]
     private string? _aiRawResponse;
 
+    // Upwork-specific fields
+    [ObservableProperty]
+    private string? _budgetType;
+
+    [ObservableProperty]
+    private decimal? _hourlyRateMin;
+
+    [ObservableProperty]
+    private decimal? _hourlyRateMax;
+
+    [ObservableProperty]
+    private decimal? _fixedPriceBudget;
+
+    [ObservableProperty]
+    private string? _projectDuration;
+
+    [ObservableProperty]
+    private decimal? _clientRating;
+
+    [ObservableProperty]
+    private decimal? _clientTotalSpent;
+
+    [ObservableProperty]
+    private int? _proposalsCount;
+
+    [ObservableProperty]
+    private int? _connectsRequired;
+
     public string DatePostedFormatted => DatePosted.ToString("MMM dd, yyyy");
     public string DateScrapedFormatted => DateScraped.ToString("MMM dd, HH:mm");
     public string StatusDisplay => Status.ToString();
+    public string PlatformDisplay => Platform.ToString();
 
     public bool HasExternalApply => !string.IsNullOrEmpty(ExternalApplyUrl);
     public bool HasRecruiterEmail => !string.IsNullOrEmpty(RecruiterEmail);
@@ -90,10 +120,16 @@ public partial class JobViewModel : ObservableObject
     public bool HasRating => Rating.HasValue;
     public string RatingDisplay => Rating.HasValue ? $"{Rating}/10" : "-";
 
+    public bool IsUpworkJob => Platform == JobPlatform.Upwork;
+    public bool IsLinkedInJob => Platform == JobPlatform.LinkedIn;
+
+    public string BudgetDisplay => GetBudgetDisplay();
+
     public JobViewModel(Job job)
     {
         Id = job.Id;
-        LinkedInJobId = job.LinkedInJobId;
+        Platform = job.Platform;
+        ExternalJobId = job.ExternalJobId;
         _title = job.Title;
         _companyName = job.Company?.Name ?? "Unknown";
         _location = job.Location;
@@ -116,9 +152,39 @@ public partial class JobViewModel : ObservableObject
         _discardReason = job.DiscardReason;
         _aiPromptSent = job.AiPromptSent;
         _aiRawResponse = job.AiRawResponse;
+
+        // Upwork-specific
+        _budgetType = job.BudgetType;
+        _hourlyRateMin = job.HourlyRateMin;
+        _hourlyRateMax = job.HourlyRateMax;
+        _fixedPriceBudget = job.FixedPriceBudget;
+        _projectDuration = job.ProjectDuration;
+        _clientRating = job.ClientRating;
+        _clientTotalSpent = job.ClientTotalSpent;
+        _proposalsCount = job.ProposalsCount;
+        _connectsRequired = job.ConnectsRequired;
     }
 
     public bool HasSummaryCroatian => !string.IsNullOrEmpty(SummaryCroatian);
     public bool HasShortSummary => !string.IsNullOrEmpty(ShortSummary);
     public bool HasAiDebugInfo => !string.IsNullOrEmpty(AiPromptSent) || !string.IsNullOrEmpty(AiRawResponse);
+
+    private string GetBudgetDisplay()
+    {
+        if (Platform != JobPlatform.Upwork) return string.Empty;
+
+        if (BudgetType == "Hourly" && HourlyRateMin.HasValue)
+        {
+            return HourlyRateMax.HasValue
+                ? $"${HourlyRateMin:F0}-${HourlyRateMax:F0}/hr"
+                : $"${HourlyRateMin:F0}/hr";
+        }
+
+        if (BudgetType == "Fixed" && FixedPriceBudget.HasValue)
+        {
+            return $"${FixedPriceBudget:F0} fixed";
+        }
+
+        return "Budget not specified";
+    }
 }

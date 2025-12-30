@@ -5,7 +5,29 @@ namespace JobFinder.Models;
 public class Job
 {
     public int Id { get; set; }
-    public required string LinkedInJobId { get; set; }
+
+    /// <summary>
+    /// The platform this job was scraped from.
+    /// </summary>
+    public JobPlatform Platform { get; set; } = JobPlatform.LinkedIn;
+
+    /// <summary>
+    /// External job ID from the platform (LinkedIn job ID, Upwork job ID, etc.).
+    /// Unique per platform.
+    /// </summary>
+    public required string ExternalJobId { get; set; }
+
+    /// <summary>
+    /// LinkedIn job ID (alias for ExternalJobId for backward compatibility).
+    /// </summary>
+    [NotMapped]
+    [Obsolete("Use ExternalJobId instead")]
+    public string LinkedInJobId
+    {
+        get => ExternalJobId;
+        set => ExternalJobId = value;
+    }
+
     public required string Title { get; set; }
 
     /// <summary>
@@ -31,7 +53,12 @@ public class Job
     public string? JobUrl { get; set; }
     public string? ExternalApplyUrl { get; set; }
     public string? RecruiterEmail { get; set; }
+
+    /// <summary>
+    /// Whether the job supports quick apply (LinkedIn Easy Apply, Upwork direct proposal).
+    /// </summary>
     public bool HasEasyApply { get; set; }
+
     public DateTime DatePosted { get; set; }
     public DateTime DateScraped { get; set; }
     public ApplicationStatus Status { get; set; } = ApplicationStatus.New;
@@ -65,4 +92,77 @@ public class Job
     /// The raw response received from AI (for debugging).
     /// </summary>
     public string? AiRawResponse { get; set; }
+
+    // ============================================================
+    // Upwork-specific fields (null for LinkedIn jobs)
+    // ============================================================
+
+    /// <summary>
+    /// Budget type for Upwork jobs: "Hourly" or "Fixed".
+    /// </summary>
+    public string? BudgetType { get; set; }
+
+    /// <summary>
+    /// Minimum hourly rate for Upwork hourly jobs.
+    /// </summary>
+    public decimal? HourlyRateMin { get; set; }
+
+    /// <summary>
+    /// Maximum hourly rate for Upwork hourly jobs.
+    /// </summary>
+    public decimal? HourlyRateMax { get; set; }
+
+    /// <summary>
+    /// Fixed price budget for Upwork fixed-price jobs.
+    /// </summary>
+    public decimal? FixedPriceBudget { get; set; }
+
+    /// <summary>
+    /// Estimated project duration (e.g., "1-3 months", "Less than a week").
+    /// </summary>
+    public string? ProjectDuration { get; set; }
+
+    /// <summary>
+    /// Client's rating on Upwork (0-5 scale).
+    /// </summary>
+    public decimal? ClientRating { get; set; }
+
+    /// <summary>
+    /// Total amount the client has spent on Upwork.
+    /// </summary>
+    public decimal? ClientTotalSpent { get; set; }
+
+    /// <summary>
+    /// Client's hire rate percentage.
+    /// </summary>
+    public decimal? ClientHireRate { get; set; }
+
+    /// <summary>
+    /// Number of proposals already submitted to this job.
+    /// </summary>
+    public int? ProposalsCount { get; set; }
+
+    /// <summary>
+    /// Number of Connects required to apply (Upwork credit system).
+    /// </summary>
+    public int? ConnectsRequired { get; set; }
+
+    /// <summary>
+    /// Required skills/tags as JSON array string.
+    /// </summary>
+    public string? RequiredSkillsJson { get; set; }
+
+    /// <summary>
+    /// Gets or sets the required skills as a list (not stored directly in DB).
+    /// </summary>
+    [NotMapped]
+    public List<string> RequiredSkills
+    {
+        get => string.IsNullOrEmpty(RequiredSkillsJson)
+            ? []
+            : System.Text.Json.JsonSerializer.Deserialize<List<string>>(RequiredSkillsJson) ?? [];
+        set => RequiredSkillsJson = value.Count > 0
+            ? System.Text.Json.JsonSerializer.Serialize(value)
+            : null;
+    }
 }

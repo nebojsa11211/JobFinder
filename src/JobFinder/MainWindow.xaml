@@ -7,7 +7,7 @@
         xmlns:vm="clr-namespace:JobFinder.ViewModels"
         xmlns:models="clr-namespace:JobFinder.Models"
         mc:Ignorable="d"
-        Title="LinkedIn Job Finder"
+        Title="Job Finder"
         Height="800" Width="1400"
         MinHeight="600" MinWidth="1000"
         Background="{StaticResource BackgroundBrush}"
@@ -37,9 +37,11 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel x:Name="TitlePanel" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock x:Name="AppTitleText" Text="LinkedIn Job Finder" FontSize="24" FontWeight="SemiBold"
+                    <TextBlock x:Name="AppTitleText" FontSize="24" FontWeight="SemiBold"
                                Foreground="{StaticResource PrimaryBrush}" VerticalAlignment="Center"
-                               ToolTip="LinkedIn Job Finder - Search and manage job applications"/>
+                               ToolTip="Job Finder - Search and manage job applications across platforms">
+                        <Run Text="Job Finder - "/><Run Text="{Binding PlatformDisplayName, Mode=OneWay}"/>
+                    </TextBlock>
                 </StackPanel>
 
                 <!-- Status -->
@@ -95,6 +97,15 @@
                     <StackPanel x:Name="FiltersStackPanel">
                         <TextBlock x:Name="SearchFiltersHeader" Text="Search Filters" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,16"
                                    ToolTip="Configure filters to narrow down your job search"/>
+
+                        <!-- Platform Selector -->
+                        <TextBlock x:Name="PlatformLabel" Text="Platform" FontWeight="Medium" Margin="0,0,0,4"
+                                   ToolTip="Select the job platform to search"/>
+                        <ComboBox x:Name="PlatformComboBox"
+                                  ItemsSource="{Binding AvailablePlatforms}"
+                                  SelectedItem="{Binding SelectedPlatform}"
+                                  Padding="8" Margin="0,0,0,12"
+                                  ToolTip="Choose between LinkedIn and Upwork job platforms"/>
 
                         <!-- Job Title -->
                         <TextBlock x:Name="JobTitleLabel" Text="Job Title" FontWeight="Medium" Margin="0,0,0,4"
@@ -384,18 +395,66 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn x:Name="EasyApplyColumn" Header="Easy Apply" Width="80">
+                            <DataGridTemplateColumn x:Name="PlatformColumn" Header="Platform" Width="75">
                                 <DataGridTemplateColumn.HeaderStyle>
                                     <Style TargetType="DataGridColumnHeader">
-                                        <Setter Property="ToolTip" Value="Indicates if LinkedIn Easy Apply is available for this job"/>
+                                        <Setter Property="ToolTip" Value="Job platform source (LinkedIn or Upwork)"/>
                                     </Style>
                                 </DataGridTemplateColumn.HeaderStyle>
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <TextBlock x:Name="EasyApplyText" Text="Easy Apply" Foreground="{StaticResource SuccessBrush}"
-                                                   FontWeight="Medium" HorizontalAlignment="Center"
-                                                   Visibility="{Binding HasEasyApply, Converter={StaticResource BoolToVisibilityConverter}}"
-                                                   ToolTip="This job supports LinkedIn Easy Apply - apply with one click"/>
+                                        <Border CornerRadius="4" Padding="6,2" HorizontalAlignment="Center">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="#E3F2FD"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Platform}" Value="Upwork">
+                                                            <Setter Property="Background" Value="#E8F5E9"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding PlatformDisplay}" FontSize="10" FontWeight="Medium" HorizontalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#1565C0"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Platform}" Value="Upwork">
+                                                                <Setter Property="Foreground" Value="#2E7D32"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Border>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTemplateColumn x:Name="QuickApplyColumn" Header="Apply" Width="80">
+                                <DataGridTemplateColumn.HeaderStyle>
+                                    <Style TargetType="DataGridColumnHeader">
+                                        <Setter Property="ToolTip" Value="Indicates if quick apply is available (Easy Apply for LinkedIn, Direct Proposal for Upwork)"/>
+                                    </Style>
+                                </DataGridTemplateColumn.HeaderStyle>
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock FontWeight="Medium" HorizontalAlignment="Center"
+                                                   Visibility="{Binding HasEasyApply, Converter={StaticResource BoolToVisibilityConverter}}">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Text" Value="Easy Apply"/>
+                                                    <Setter Property="Foreground" Value="{StaticResource SuccessBrush}"/>
+                                                    <Setter Property="ToolTip" Value="This job supports LinkedIn Easy Apply"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Platform}" Value="Upwork">
+                                                            <Setter Property="Text" Value="Proposal"/>
+                                                            <Setter Property="Foreground" Value="#2E7D32"/>
+                                                            <Setter Property="ToolTip" Value="Submit a proposal on Upwork"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>

@@ -20,6 +20,10 @@ public class JobRepository : IJobRepository
         await _context.MigrateSchemaAsync();
     }
 
+    // ============================================================
+    // Query methods
+    // ============================================================
+
     public async Task<List<Job>> GetAllJobsAsync(bool includeDiscarded = false)
     {
         var query = _context.Jobs.Include(j => j.Company).AsQueryable();
@@ -44,12 +48,54 @@ public class JobRepository : IJobRepository
             .ToListAsync();
     }
 
-    public async Task<Job?> GetJobByLinkedInIdAsync(string linkedInJobId)
+    public async Task<List<Job>> GetJobsByPlatformAsync(JobPlatform platform, bool includeDiscarded = false)
+    {
+        var query = _context.Jobs.Include(j => j.Company).Where(j => j.Platform == platform);
+        if (!includeDiscarded)
+        {
+            query = query.Where(j => !j.IsDiscarded);
+        }
+        return await query
+            .OrderByDescending(j => j.DatePosted)
+            .ToListAsync();
+    }
+
+    public async Task<List<Job>> GetActiveJobsAsync()
     {
         return await _context.Jobs
             .Include(j => j.Company)
-            .FirstOrDefaultAsync(j => j.LinkedInJobId == linkedInJobId);
+            .Where(j => !j.IsDiscarded)
+            .OrderByDescending(j => j.DatePosted)
+            .ToListAsync();
     }
+
+    public async Task<Job?> GetJobByExternalIdAsync(JobPlatform platform, string externalJobId)
+    {
+        return await _context.Jobs
+            .Include(j => j.Company)
+            .FirstOrDefaultAsync(j => j.Platform == platform && j.ExternalJobId == externalJobId);
+    }
+
+    [Obsolete("Use GetJobByExternalIdAsync instead")]
+    public async Task<Job?> GetJobByLinkedInIdAsync(string linkedInJobId)
+    {
+        return await GetJobByExternalIdAsync(JobPlatform.LinkedIn, linkedInJobId);
+    }
+
+    public async Task<bool> JobExistsAsync(JobPlatform platform, string externalJobId)
+    {
+        return await _context.Jobs.AnyAsync(j => j.Platform == platform && j.ExternalJobId == externalJobId);
+    }
+
+    [Obsolete("Use JobExistsAsync(JobPlatform, string) instead")]
+    public async Task<bool> JobExistsAsync(string linkedInJobId)
+    {
+        return await JobExistsAsync(JobPlatform.LinkedIn, linkedInJobId);
+    }
+
+    // ============================================================
+    // Write methods
+    // ============================================================
 
     public async Task<Job> AddJobAsync(Job job)
     {
@@ -78,17 +124,12 @@ public class JobRepository : IJobRepository
         return job;
     }
 
-    public async Task<bool> JobExistsAsync(string linkedInJobId)
-    {
-        return await _context.Jobs.AnyAsync(j => j.LinkedInJobId == linkedInJobId);
-    }
-
     public async Task<int> AddJobsAsync(IEnumerable<Job> jobs)
     {
         int addedCount = 0;
         foreach (var job in jobs)
         {
-            if (!await JobExistsAsync(job.LinkedInJobId))
+            if (!await JobExistsAsync(job.Platform, job.ExternalJobId))
             {
                 // Link job to company
                 await LinkJobToCompanyAsync(job);
@@ -157,14 +198,5 @@ public class JobRepository : IJobRepository
         _context.ChangeTracker.Clear();
 
         return count;
-    }
-
-    public async Task<List<Job>> GetActiveJobsAsync()
-    {
-        return await _context.Jobs
-            .Include(j => j.Company)
-            .Where(j => !j.IsDiscarded)
-            .OrderByDescending(j => j.DatePosted)
-            .ToListAsync();
     }
 }

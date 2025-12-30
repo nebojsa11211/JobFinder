@@ -17,9 +17,24 @@ public class ApplicationSession
     public int JobId { get; set; }
 
     /// <summary>
-    /// LinkedIn job ID.
+    /// The platform this application is for.
     /// </summary>
-    public string LinkedInJobId { get; set; } = "";
+    public JobPlatform Platform { get; set; } = JobPlatform.LinkedIn;
+
+    /// <summary>
+    /// External job ID from the platform (LinkedIn job ID, Upwork job ID, etc.).
+    /// </summary>
+    public string ExternalJobId { get; set; } = "";
+
+    /// <summary>
+    /// LinkedIn job ID (alias for ExternalJobId for backward compatibility).
+    /// </summary>
+    [Obsolete("Use ExternalJobId instead")]
+    public string LinkedInJobId
+    {
+        get => ExternalJobId;
+        set => ExternalJobId = value;
+    }
 
     /// <summary>
     /// Job title for display and logging.

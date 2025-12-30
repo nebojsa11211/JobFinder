@@ -24,8 +24,12 @@ public class JobFinderDbContext : DbContext
         modelBuilder.Entity<Job>(entity =>
         {
             entity.HasKey(e => e.Id);
-            entity.HasIndex(e => e.LinkedInJobId).IsUnique();
+
+            // Composite unique index on Platform + ExternalJobId
+            entity.HasIndex(e => new { e.Platform, e.ExternalJobId }).IsUnique();
+
             entity.Property(e => e.Status).HasConversion<string>();
+            entity.Property(e => e.Platform).HasConversion<string>();
 
             // Relationship to Company
             entity.HasOne(e => e.Company)
@@ -55,7 +59,9 @@ public class JobFinderDbContext : DbContext
 
         try
         {
-            // Add new columns for Jobs table
+            // ============================================================
+            // Core Job columns
+            // ============================================================
             await AddColumnIfNotExistsAsync(connection, "Jobs", "SummaryCroatian", "TEXT NULL");
             await AddColumnIfNotExistsAsync(connection, "Jobs", "ShortSummary", "TEXT NULL");
             await AddColumnIfNotExistsAsync(connection, "Jobs", "IsDiscarded", "INTEGER NOT NULL DEFAULT 0");
@@ -65,7 +71,33 @@ public class JobFinderDbContext : DbContext
             await AddColumnIfNotExistsAsync(connection, "Jobs", "AiPromptSent", "TEXT NULL");
             await AddColumnIfNotExistsAsync(connection, "Jobs", "AiRawResponse", "TEXT NULL");
 
-            // Create Companies table if it doesn't exist
+            // ============================================================
+            // Multi-platform support columns
+            // ============================================================
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "Platform", "TEXT NOT NULL DEFAULT 'LinkedIn'");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ExternalJobId", "TEXT NULL");
+
+            // Migrate LinkedInJobId to ExternalJobId for existing records
+            await MigrateLinkedInJobIdToExternalJobIdAsync(connection);
+
+            // ============================================================
+            // Upwork-specific columns
+            // ============================================================
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "BudgetType", "TEXT NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "HourlyRateMin", "REAL NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "HourlyRateMax", "REAL NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "FixedPriceBudget", "REAL NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ProjectDuration", "TEXT NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ClientRating", "REAL NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ClientTotalSpent", "REAL NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ClientHireRate", "REAL NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ProposalsCount", "INTEGER NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "ConnectsRequired", "INTEGER NULL");
+            await AddColumnIfNotExistsAsync(connection, "Jobs", "RequiredSkillsJson", "TEXT NULL");
+
+            // ============================================================
+            // Companies table
+            // ============================================================
             await CreateCompaniesTableIfNotExistsAsync(connection);
 
             // Populate Companies from existing Jobs and link them
@@ -74,10 +106,64 @@ public class JobFinderDbContext : DbContext
             // Try to drop legacy CompanyName/Company column (SQLite 3.35.0+)
             await TryDropColumnAsync(connection, "Jobs", "CompanyName");
             await TryDropColumnAsync(connection, "Jobs", "Company");
+
+            // Create new composite index if it doesn't exist
+            await CreateIndexIfNotExistsAsync(connection, "Jobs",
+                "IX_Jobs_Platform_ExternalJobId", "Platform, ExternalJobId", isUnique: true);
         }
         finally
         {
             await connection.CloseAsync();
+        }
+    }
+
+    private static async Task MigrateLinkedInJobIdToExternalJobIdAsync(System.Data.Common.DbConnection connection)
+    {
+        using var command = connection.CreateCommand();
+
+        // Check if LinkedInJobId column exists
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('Jobs') WHERE name='LinkedInJobId'";
+        var hasLinkedInJobId = Convert.ToInt32(await command.ExecuteScalarAsync()) > 0;
+
+        if (hasLinkedInJobId)
+        {
+            // Copy LinkedInJobId values to ExternalJobId where ExternalJobId is null
+            command.CommandText = @"
+                UPDATE Jobs
+                SET ExternalJobId = LinkedInJobId
+                WHERE ExternalJobId IS NULL AND LinkedInJobId IS NOT NULL";
+            await command.ExecuteNonQueryAsync();
+
+            // Try to drop the old LinkedInJobId column (SQLite 3.35.0+)
+            await TryDropColumnAsync(connection, "Jobs", "LinkedInJobId");
+        }
+    }
+
+    private static async Task CreateIndexIfNotExistsAsync(
+        System.Data.Common.DbConnection connection,
+        string tableName,
+        string indexName,
+        string columns,
+        bool isUnique = false)
+    {
+        using var command = connection.CreateCommand();
+
+        // Check if index exists
+        command.CommandText = $"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='{indexName}'";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync()) > 0;
+
+        if (!exists)
+        {
+            var uniqueKeyword = isUnique ? "UNIQUE " : "";
+            command.CommandText = $"CREATE {uniqueKeyword}INDEX {indexName} ON {tableName}({columns})";
+            try
+            {
+                await command.ExecuteNonQueryAsync();
+            }
+            catch
+            {
+                // Index creation might fail if there are duplicate values - ignore
+            }
         }
     }
 

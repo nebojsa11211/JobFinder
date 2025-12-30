@@ -12,6 +12,7 @@ namespace JobFinder.ViewModels;
 public partial class MainViewModel : ObservableObject
 {
     private readonly IJobRepository _jobRepository;
+    private readonly IJobPlatformServiceFactory _platformServiceFactory;
     private readonly ILinkedInService _linkedInService;
     private readonly IKimiService _kimiService;
     private readonly ISettingsService _settingsService;
@@ -42,6 +43,18 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private string _searchProgress = "";
 
+    // Platform selection
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsLinkedInSelected))]
+    [NotifyPropertyChangedFor(nameof(IsUpworkSelected))]
+    [NotifyPropertyChangedFor(nameof(PlatformDisplayName))]
+    private JobPlatform _selectedPlatform = JobPlatform.LinkedIn;
+
+    public List<JobPlatform> AvailablePlatforms { get; } = [JobPlatform.LinkedIn, JobPlatform.Upwork];
+    public bool IsLinkedInSelected => SelectedPlatform == JobPlatform.LinkedIn;
+    public bool IsUpworkSelected => SelectedPlatform == JobPlatform.Upwork;
+    public string PlatformDisplayName => SelectedPlatform.ToString();
+
     // Filter properties
     [ObservableProperty]
     private string _jobTitle = ".NET Developer";
@@ -65,9 +78,24 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private ApplicationStatus? _statusFilter;
 
-    public MainViewModel(IJobRepository jobRepository, ILinkedInService linkedInService, IKimiService kimiService, ISettingsService settingsService)
+    // Platform filter for job list (null = show all platforms)
+    [ObservableProperty]
+    private JobPlatform? _platformFilter;
+
+    /// <summary>
+    /// Gets the currently selected platform service.
+    /// </summary>
+    private IJobPlatformService CurrentPlatformService => _platformServiceFactory.GetService(SelectedPlatform);
+
+    public MainViewModel(
+        IJobRepository jobRepository,
+        IJobPlatformServiceFactory platformServiceFactory,
+        ILinkedInService linkedInService,
+        IKimiService kimiService,
+        ISettingsService settingsService)
     {
         _jobRepository = jobRepository;
+        _platformServiceFactory = platformServiceFactory;
         _linkedInService = linkedInService;
         _kimiService = kimiService;
         _settingsService = settingsService;
@@ -77,7 +105,7 @@ public partial class MainViewModel : ObservableObject
     {
         await _jobRepository.InitializeDatabaseAsync();
         await LoadJobsAsync();
-        StatusMessage = $"Loaded {Jobs.Count} jobs from database. Click Refresh to search LinkedIn.";
+        StatusMessage = $"Loaded {Jobs.Count} jobs from database. Select a platform and click Refresh to search.";
     }
 
     [RelayCommand]
@@ -85,35 +113,38 @@ public partial class MainViewModel : ObservableObject
     {
         if (IsSearching) return;
 
+        var platformService = CurrentPlatformService;
+        var platformName = SelectedPlatform.ToString();
+
         try
         {
-            // Open LinkedIn browser if not already open
-            if (!_linkedInService.IsBrowserOpen)
+            // Open browser if not already open
+            if (!platformService.IsBrowserOpen)
             {
-                StatusMessage = "Opening LinkedIn...";
-                await _linkedInService.OpenLoginWindowAsync();
+                StatusMessage = $"Opening {platformName}...";
+                await platformService.OpenLoginWindowAsync();
                 await Task.Delay(3000);
             }
 
             // Check login status
             StatusMessage = "Checking login status...";
-            IsLoggedIn = await _linkedInService.CheckLoginStatusAsync();
+            IsLoggedIn = await platformService.CheckLoginStatusAsync();
 
             if (!IsLoggedIn)
             {
-                StatusMessage = "Please log in to LinkedIn in the browser window, then click Refresh again.";
+                StatusMessage = $"Please log in to {platformName} in the browser window, then click Refresh again.";
                 return;
             }
 
             // Search for jobs
-            StatusMessage = "Logged in! Searching for jobs...";
+            StatusMessage = $"Logged in! Searching {platformName} for jobs...";
             await SearchJobsAsync();
 
-            // After search, fetch missing details for ALL existing jobs
+            // After search, fetch missing details for jobs from this platform
             IsSearching = true;
             _searchCts = new CancellationTokenSource();
-            var allJobs = await _jobRepository.GetAllJobsAsync();
-            await FetchMissingDetailsAsync(allJobs, _searchCts.Token);
+            var platformJobs = await _jobRepository.GetJobsByPlatformAsync(SelectedPlatform);
+            await FetchMissingDetailsAsync(platformJobs, _searchCts.Token);
             await LoadJobsAsync();
             IsSearching = false;
             SearchProgress = "";
@@ -143,9 +174,11 @@ public partial class MainViewModel : ObservableObject
 
     private async Task SearchJobsAsync()
     {
+        var platformService = CurrentPlatformService;
+
         if (!IsLoggedIn)
         {
-            StatusMessage = "Please log in to LinkedIn first.";
+            StatusMessage = $"Please log in to {SelectedPlatform} first.";
             return;
         }
 
@@ -169,7 +202,7 @@ public partial class MainViewModel : ObservableObject
                 StatusMessage = msg;
             });
 
-            var foundJobs = await _linkedInService.SearchJobsAsync(filter, progress, _searchCts.Token);
+            var foundJobs = await platformService.SearchJobsAsync(filter, progress, _searchCts.Token);
 
             // Save to database (only adds new jobs)
             var newJobsCount = await _jobRepository.AddJobsAsync(foundJobs);
@@ -183,7 +216,7 @@ public partial class MainViewModel : ObservableObject
             // Refresh the list
             await LoadJobsAsync();
 
-            StatusMessage = $"Done. Found {foundJobs.Count} jobs, {newJobsCount} new.";
+            StatusMessage = $"Done. Found {foundJobs.Count} jobs on {SelectedPlatform}, {newJobsCount} new.";
         }
         catch (OperationCanceledException)
         {
@@ -220,11 +253,29 @@ public partial class MainViewModel : ObservableObject
         {
             if (SelectedJob.HasEasyApply)
             {
-                StatusMessage = "Opening Easy Apply...";
-                var success = await _linkedInService.StartEasyApplyAsync(SelectedJob.JobUrl ?? "");
-                StatusMessage = success
-                    ? "Easy Apply opened. Complete the application in the browser."
-                    : "Could not open Easy Apply.";
+                // Platform-specific quick apply
+                if (SelectedJob.Platform == JobPlatform.LinkedIn)
+                {
+                    StatusMessage = "Opening Easy Apply...";
+                    var success = await _linkedInService.StartEasyApplyAsync(SelectedJob.JobUrl ?? "");
+                    StatusMessage = success
+                        ? "Easy Apply opened. Complete the application in the browser."
+                        : "Could not open Easy Apply.";
+                }
+                else if (SelectedJob.Platform == JobPlatform.Upwork)
+                {
+                    // For Upwork, open the job URL - proposals are submitted through AutoApply
+                    StatusMessage = "Opening Upwork job page...";
+                    if (!string.IsNullOrEmpty(SelectedJob.JobUrl))
+                    {
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = SelectedJob.JobUrl,
+                            UseShellExecute = true
+                        });
+                        StatusMessage = "Use Auto Apply to submit a proposal, or apply manually in the browser.";
+                    }
+                }
             }
             else if (!string.IsNullOrEmpty(SelectedJob.ExternalApplyUrl))
             {
@@ -306,7 +357,7 @@ public partial class MainViewModel : ObservableObject
             var description = SelectedJob.Description ?? "";
 
             // Step 1: Get the job from database for full details
-            var job = await _jobRepository.GetJobByLinkedInIdAsync(SelectedJob.LinkedInJobId);
+            var job = await _jobRepository.GetJobByExternalIdAsync(SelectedJob.Platform, SelectedJob.ExternalJobId);
             if (job == null)
             {
                 StatusMessage = "Could not find job in database.";
@@ -615,7 +666,7 @@ public partial class MainViewModel : ObservableObject
                 SelectedJob.RecruiterEmail = details.RecruiterEmail;
 
                 // Update in database
-                var job = await _jobRepository.GetJobByLinkedInIdAsync(SelectedJob.LinkedInJobId);
+                var job = await _jobRepository.GetJobByExternalIdAsync(SelectedJob.Platform, SelectedJob.ExternalJobId);
                 if (job != null)
                 {
                     job.Description = details.Description;
@@ -720,9 +771,13 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task CloseBrowserAsync()
     {
-        await _linkedInService.CloseAsync();
+        // Close all platform browsers
+        foreach (var service in _platformServiceFactory.GetAllServices())
+        {
+            await service.CloseAsync();
+        }
         IsLoggedIn = false;
-        StatusMessage = "Browser closed.";
+        StatusMessage = "All browsers closed.";
     }
 
     [RelayCommand]
@@ -865,7 +920,7 @@ public partial class MainViewModel : ObservableObject
                         job.RecruiterEmail = details.RecruiterEmail;
 
                         // Update in database
-                        var dbJob = await _jobRepository.GetJobByLinkedInIdAsync(job.LinkedInJobId);
+                        var dbJob = await _jobRepository.GetJobByExternalIdAsync(job.Platform, job.ExternalJobId);
                         if (dbJob != null)
                         {
                             dbJob.Description = details.Description;
@@ -937,7 +992,7 @@ public partial class MainViewModel : ObservableObject
                     }
 
                     // Update in database
-                    var dbJob = await _jobRepository.GetJobByLinkedInIdAsync(job.LinkedInJobId);
+                    var dbJob = await _jobRepository.GetJobByExternalIdAsync(job.Platform, job.ExternalJobId);
                     if (dbJob != null)
                     {
                         dbJob.SummaryCroatian = result.Summary;
